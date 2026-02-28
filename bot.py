@@ -16,8 +16,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # Config
-BOT_TOKEN = "8544623193:AAGB5p8qqnkPbsmolPkKVpAGW7XmWdmFOak"
-ADMIN_ID = 5944410248
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8544623193:AAGB5p8qqnkPbsmolPkKVpAGW7XmWdmFOak")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "5944410248"))
 DB = "checker.db"
 
 # Global proxy list and thread pool
@@ -419,7 +419,9 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     elif q.data == "check": await q.edit_message_text("📝 **Combo Input**\n\nSend `email:password` list or upload a `.txt` file.", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
     elif q.data == "stats":
         s = db.user_stats(uid)
-        await q.edit_message_text(f"📊 **Statistics for {u.effective_user.first_name}**\n\n💰 Credits: `{'Unlimited' if uid == ADMIN_ID else s['credits']}`\n🔍 Checks: `{s['checks']}`\n🎯 Hits: `{s['hits']}`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
+        creds = "Unlimited" if uid == ADMIN_ID else s['credits']
+        user_label = "Admin" if uid == ADMIN_ID else u.effective_user.first_name
+        await q.edit_message_text(f"📊 **Statistics for {user_label}**\n\n💰 Credits: `{creds}`\n🔍 Checks: `{s['checks']}`\n🎯 Hits: `{s['hits']}`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
     elif q.data == "proxies": await q.edit_message_text(f"🌐 **Proxy Loader**\n\nLoaded: `{len(PROXIES)}` proxies.\nFormat: `ip:port` (HTTP/HTTPS only).\nUpdate by uploading .txt with 'proxy' in caption.", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
     elif q.data == "admin":
         if uid == ADMIN_ID:
@@ -442,7 +444,7 @@ def main():
     app.add_handler(CommandHandler("threads", set_threads))
     app.add_handler(CommandHandler("keywords", set_keywords))
     app.add_handler(CallbackQueryHandler(cb_handler))
-    app.add_handler(MessageHandler(filters.Document.FileExtension("txt") & filters.CaptionRegex(r'prox', re.I), handle_proxies))
+    app.add_handler(MessageHandler(filters.Document.FileExtension("txt") & filters.CaptionRegex(re.compile(r'prox', re.I)), handle_proxies))
     app.add_handler(MessageHandler(filters.Document.FileExtension("txt"), handle_combo))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r':'), handle_combo))
     app.run_polling()
