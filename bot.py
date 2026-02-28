@@ -16,12 +16,12 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # Config
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("8544623193:AAGB5p8qqnkPbsmolPkKVpAGW7XmWdmFOak")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "5944410248"))
 
 if not BOT_TOKEN:
     # Set this in your environment variables for production
-    raise ValueError("BOT_TOKEN not found in environment!")
+    raise ValueError("bot token not found")
 DB = "checker.db"
 
 # Global proxy list and thread pool
