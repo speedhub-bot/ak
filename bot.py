@@ -19,8 +19,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # SECTION 3 — CONFIG CONSTANTS
-BOT_TOKEN = os.environ.get('BOT_TOKEN', '8544623193:AAGB5p8qqnkPbsmolPkKVpAGW7XmWdmFOak')
-ADMIN_ID = int(os.environ.get('ADMIN_ID', '5944410248'))
+BOT_TOKEN = os.environ.get('8544623193:AAGB5p8qqnkPbsmolPkKVpAGW7XmWdmFOak')
+ADMIN_ID = int(os.environ.get('5944410248', '0'))
 DB = os.environ.get('DB_PATH', 'checker.db')
 MAX_EXECUTOR_WORKERS = 500
 
