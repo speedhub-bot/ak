@@ -71,7 +71,8 @@ class AkazaDatabase:
                 total_checks INTEGER DEFAULT 0,
                 total_hits INTEGER DEFAULT 0,
                 join_date TEXT,
-                access_expiry TEXT
+                access_expiry TEXT,
+                last_reset_date TEXT
             )
         ''')
         self._execute('''
@@ -94,13 +95,22 @@ class AkazaDatabase:
         ''')
 
     def add_user(self, uid, username, first_name):
+        now = datetime.now().isoformat()
         self._execute('''
-            INSERT OR IGNORE INTO users (user_id, username, first_name, join_date)
-            VALUES (?, ?, ?, ?)
-        ''', (uid, username, first_name, datetime.now().isoformat()))
+            INSERT OR IGNORE INTO users (user_id, username, first_name, join_date, last_reset_date, credits)
+            VALUES (?, ?, ?, ?, ?, 2000)
+        ''', (uid, username, first_name, now, now))
         self._execute('''
             INSERT OR IGNORE INTO settings (user_id) VALUES (?)
         ''', (uid,))
+
+    def check_and_reset_credits(self, uid):
+        if uid == ADMIN_ID: return
+        res = self._execute('SELECT last_reset_date FROM users WHERE user_id = ?', (uid,), fetchone=True)
+        if res and res[0]:
+            last_reset = datetime.fromisoformat(res[0])
+            if datetime.now() - last_reset > timedelta(days=1):
+                self._execute('UPDATE users SET credits = 2000, last_reset_date = ? WHERE user_id = ?', (datetime.now().isoformat(), uid))
 
     def is_banned(self, uid):
         res = self._execute('SELECT is_banned FROM users WHERE user_id = ?', (uid,), fetchone=True)
@@ -145,21 +155,27 @@ class AkazaDatabase:
             return
         self._execute('UPDATE users SET credits = MAX(0, credits - 1) WHERE user_id = ?', (uid,))
 
+    def has_credits(self, uid):
+        if uid == ADMIN_ID: return True
+        res = self._execute('SELECT credits FROM users WHERE user_id = ?', (uid,), fetchone=True)
+        return res[0] > 0 if res else False
+
     def get_credits(self, uid):
         if uid == ADMIN_ID:
             return 999999
         res = self._execute('SELECT credits FROM users WHERE user_id = ?', (uid,), fetchone=True)
         return res[0] if res else 0
 
-    def grant_access(self, uid):
-        self._execute('UPDATE users SET has_access = 1, access_expiry = NULL WHERE user_id = ?', (uid,))
+    def grant_access(self, uid, days=None):
+        if days:
+            expiry = (datetime.now() + timedelta(days=days)).isoformat()
+            self._execute('UPDATE users SET has_access = 1, access_expiry = ? WHERE user_id = ?', (expiry, uid))
+        else:
+            self._execute('UPDATE users SET has_access = 1, access_expiry = NULL WHERE user_id = ?', (uid,))
 
     def revoke_access(self, uid):
         self._execute('UPDATE users SET has_access = 0, access_expiry = NULL WHERE user_id = ?', (uid,))
 
-    def grant_timed_access(self, uid, days):
-        expiry = (datetime.now() + timedelta(days=days)).isoformat()
-        self._execute('UPDATE users SET has_access = 1, access_expiry = ? WHERE user_id = ?', (expiry, uid))
 
     def ban(self, uid):
         self._execute('UPDATE users SET is_banned = 1 WHERE user_id = ?', (uid,))
@@ -564,6 +580,7 @@ class AkazaBot:
     async def check_user(self, update: Update):
         uid = update.effective_user.id
         akaza_db.add_user(uid, update.effective_user.username, update.effective_user.first_name)
+        akaza_db.check_and_reset_credits(uid)
         if akaza_db.is_banned(uid):
             await update.message.reply_text("❌ You are banned from using this bot.")
             return False
@@ -587,12 +604,13 @@ class AkazaBot:
             f"👤 *User:* `{update.effective_user.first_name}`\n"
             f"🆔 *ID:* `{uid}`\n"
             f"🎖 *Role:* `{role}`\n"
-            f"💰 *Credits:* `{cred}`\n\n"
+            f"💰 *Credits:* `{cred}`/2000 (Daily Reset)\n"
+            f"👑 *Admin:* @Akaza_admin\n\n"
             "📥 *Send a .txt combo (email:pass) or text to start checking.*"
         )
         kbd = [
             [InlineKeyboardButton("📊 Stats", callback_data="stats"), InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
-            [InlineKeyboardButton("🆘 Help", callback_data="help"), InlineKeyboardButton("📜 My Hits", callback_data="hits")]
+            [InlineKeyboardButton("🔌 Proxy", callback_data="proxy"), InlineKeyboardButton("🆘 Help", callback_data="help")]
         ]
         await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kbd))
 
@@ -739,11 +757,9 @@ class AkazaBot:
             help_text = (
                 "🛠 *Admin/Mod Commands*\n"
                 "`!!addcredits [id] [amt]`\n"
-                "`!!setcredits [id] [amt]`\n"
-                "`!!resetcredits [id]`\n"
                 "`!!grant [id]` (Lifetime)\n"
+                "`!!grant [id] [days]` (Timed)\n"
                 "`!!revoke [id]`\n"
-                "`!!addaccess [id] [days]`\n"
                 "`!!ban [id]`\n"
                 "`!!unban [id]`\n"
                 "`!!mod [id]` (Owner only)\n"
@@ -760,25 +776,16 @@ class AkazaBot:
             akaza_db.add_credits(int(parts[1]), int(parts[2]))
             await update.message.reply_text(f"✅ Added {parts[2]} credits to `{parts[1]}`")
 
-        elif cmd == '!!setcredits' and len(parts) == 3:
-            akaza_db.set_credits(int(parts[1]), int(parts[2]))
-            await update.message.reply_text(f"✅ Set credits for `{parts[1]}` to {parts[2]}")
-
-        elif cmd == '!!resetcredits' and len(parts) == 2:
-            akaza_db.reset_credits(int(parts[1]))
-            await update.message.reply_text(f"✅ Credits reset for `{parts[1]}`")
-
-        elif cmd == '!!grant' and len(parts) == 2:
-            akaza_db.grant_access(int(parts[1]))
-            await update.message.reply_text(f"✅ Granted lifetime access to `{parts[1]}`")
+        elif cmd == '!!grant' and len(parts) >= 2:
+            target = int(parts[1])
+            days = int(parts[2]) if len(parts) == 3 else None
+            akaza_db.grant_access(target, days)
+            await update.message.reply_text(f"✅ Granted {'Lifetime' if not days else f'{days} days'} access to `{target}`")
 
         elif cmd == '!!revoke' and len(parts) == 2:
             akaza_db.revoke_access(int(parts[1]))
             await update.message.reply_text(f"✅ Revoked access from `{parts[1]}`")
 
-        elif cmd == '!!addaccess' and len(parts) == 3:
-            akaza_db.grant_timed_access(int(parts[1]), int(parts[2]))
-            await update.message.reply_text(f"✅ Granted {parts[2]} days access to `{parts[1]}`")
 
         elif cmd == '!!ban' and len(parts) == 2:
             akaza_db.ban(int(parts[1]))
@@ -930,6 +937,9 @@ class AkazaBot:
             await query.edit_message_text(msg, parse_mode='Markdown')
         elif query.data == "help":
             await query.edit_message_text("🆘 *Help*\nSend a combo list (email:pass) as text or .txt file.\nUse /threads <num> to set speed.\nUse /keywords <k1,k2> for custom inbox scan.", parse_mode='Markdown')
+        elif query.data == "proxy":
+            px_count = len(self.user_proxies.get(uid, []))
+            await query.edit_message_text(f"🔌 *Proxy Management*\n\nStatus: `{px_count}` proxies loaded.\n\nTo use proxies, upload a `.txt` file containing your proxies. Proxies are only used for **one** session and then cleared.\n\n*Format:* `ip:port` or `ip:port:user:pass`", parse_mode='Markdown')
 
     def run(self):
         self.app.add_handler(CommandHandler("start", self.start))
