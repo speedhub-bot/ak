@@ -1047,23 +1047,23 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     badge       = _tier_badge(uid, i.get("credits", 0), has_acc, is_mod_flag)
 
     queue_pos  = _queue_position(uid)
-    queue_line = f"\\n⏳ <b>Queue:</b> <code>#{queue_pos}</code>" if queue_pos > 0 else ""
+    queue_line = f"\n⏳ <b>Queue:</b> <code>#{queue_pos}</code>" if queue_pos > 0 else ""
     expiry_line = ""
     if i.get("access_expiry"):
         try:
             d = (datetime.fromisoformat(i["access_expiry"]) - datetime.now()).days
-            expiry_line = f"\\n📅 <b>Access:</b> <code>{max(0, d)} days left</code>"
+            expiry_line = f"\n📅 <b>Access:</b> <code>{max(0, d)} days left</code>"
         except: pass
 
     msg = (
-        f"💠 <b>AKAZA Premium Checker</b>  {badge}\\n"
-        f"━━━━━━━━━━━━━━━━━━\\n"
-        f"👤 <b>User:</b>     <code>{u.effective_user.first_name}</code>\\n"
-        f"💰 <b>Credits:</b>  <code>{i.get('credits', 0)}</code>\\n"
+        f"💠 <b>AKAZA Premium Checker</b>  {badge}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>User:</b>     <code>{u.effective_user.first_name}</code>\n"
+        f"💰 <b>Credits:</b>  <code>{i.get('credits', 0)}</code>\n"
         f"⚙️ <b>Threads:</b>  <code>{s['threads']}</code>  │  "
-        f"⚡ <b>Fast:</b> <code>{'ON' if s['fast_mode'] else 'OFF'}</code>\\n"
-        f"🔍 <b>Keywords:</b> <code>{len(s['keywords'])}</code>{expiry_line}{queue_line}\\n"
-        f"━━━━━━━━━━━━━━━━━━\\n"
+        f"⚡ <b>Fast:</b> <code>{'ON' if s['fast_mode'] else 'OFF'}</code>\n"
+        f"🔍 <b>Keywords:</b> <code>{len(s['keywords'])}</code>{expiry_line}{queue_line}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
         f"🛡️ <i>Microsoft &amp; Gaming validator · @Akaza_isnt</i>"
     )
     kbd = [
@@ -1288,7 +1288,7 @@ async def handle_combo(u: Update, c: ContextTypes.DEFAULT_TYPE, text=None):
                     psn_line = f"🎮 <b>PSN:</b> <code>{psn['count']} Orders</code>"
                     if psn.get('ps_plus'): psn_line += " | ✅ PS Plus"
                     if psn.get('total_spent'): psn_line += f" | 💸 ${psn['total_spent']}"
-                    if psn.get('items'): psn_line += f"\\n   └ {', '.join(psn['items'][:4])}"
+                    if psn.get('items'): psn_line += f"\n   └ {', '.join(psn['items'][:4])}"
                     msg += psn_line + "\n"
                     psn_entry = f"{email}:{password} | Orders:{psn['count']}"
                     if psn.get('ps_plus'): psn_entry += " | PS Plus"
@@ -1397,14 +1397,14 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
         if inf.get("access_expiry"):
             try:
                 d = (datetime.fromisoformat(inf["access_expiry"]) - datetime.now()).days
-                expiry = f"\\n📅 <b>Access Expires:</b> <code>{max(0,d)} days</code>"
+                expiry = f"\n📅 <b>Access Expires:</b> <code>{max(0,d)} days</code>"
             except: pass
         txt = (
-            f"📊 <b>Your Statistics</b>\\n"
-            f"━━━━━━━━━━━━━━━━━━\\n"
-            f"🔍 <b>Total Checks:</b> <code>{st['checks']}</code>\\n"
-            f"🎯 <b>Total Hits:</b>   <code>{st['hits']}</code>\\n"
-            f"💯 <b>Hit Rate:</b>     <code>{pct}</code>\\n"
+            f"📊 <b>Your Statistics</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🔍 <b>Total Checks:</b> <code>{st['checks']}</code>\n"
+            f"🎯 <b>Total Hits:</b>   <code>{st['hits']}</code>\n"
+            f"💯 <b>Hit Rate:</b>     <code>{pct}</code>\n"
             f"💰 <b>Credits Left:</b> <code>{st['credits']}</code>{expiry}"
         )
         await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(_back_btn()), parse_mode="HTML")
@@ -1413,10 +1413,10 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     elif data == "settings":
         s = akaza_db.get_user_settings(uid)
         txt = (
-            f"⚙️ <b>Settings</b>\\n"
-            f"━━━━━━━━━━━━━━━━━━\\n"
-            f"📶 <b>Threads:</b>   <code>{s['threads']}</code>  (use + / − to adjust)\\n"
-            f"⚡ <b>Fast Mode:</b> <code>{'ON ✅' if s['fast_mode'] else 'OFF ❌'}</code>  (skip inbox scan)\\n\\n"
+            f"⚙️ <b>Settings</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📶 <b>Threads:</b>   <code>{s['threads']}</code>  (use + / − to adjust)\n"
+            f"⚡ <b>Fast Mode:</b> <code>{'ON ✅' if s['fast_mode'] else 'OFF ❌'}</code>  (skip inbox scan)\n\n"
             f"<i>Higher threads = faster CPM. Use proxies for best results.</i>"
         )
         kbd = [
@@ -1448,11 +1448,11 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     elif data == "kw_menu":
         s   = akaza_db.get_user_settings(uid)
         kws = s["keywords"]
-        kw_list = "\\n".join([f"  • <code>{k}</code>" for k in kws]) if kws else "  <i>None set</i>"
+        kw_list = "\n".join([f"  • <code>{k}</code>" for k in kws]) if kws else "  <i>None set</i>"
         txt = (
-            f"🔍 <b>Keywords</b> ({len(kws)} active)\\n"
-            f"━━━━━━━━━━━━━━━━━━\\n"
-            f"{kw_list}\\n\\n"
+            f"🔍 <b>Keywords</b> ({len(kws)} active)\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"{kw_list}\n\n"
             f"<i>Keywords are searched in your inbox during checks.</i>"
         )
         kbd = [
@@ -1465,9 +1465,9 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     elif data == "kw_add":
         akaza_db.update_settings(uid, is_adding_kw=True)
         await q.edit_message_text(
-            "🔍 <b>Add Keywords</b>\\n━━━━━━━━━━━━━━━━━━\\n"
-            "Send keywords (space or newline separated).\\n"
-            "Example: <code>paypal.com noreply@netflix.com</code>\\n\\n"
+            "🔍 <b>Add Keywords</b>\n━━━━━━━━━━━━━━━━━━\n"
+            "Send keywords (space or newline separated).\n"
+            "Example: <code>paypal.com noreply@netflix.com</code>\n\n"
             "Use /skw to stop.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏹ Stop", callback_data="kw_stop")]]),
             parse_mode="HTML")
@@ -1483,11 +1483,11 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     elif data == "proxy_menu":
         n = len(user_proxies.get(uid, []))
         txt = (
-            f"🌐 <b>Proxy Settings</b>\\n"
-            f"━━━━━━━━━━━━━━━━━━\\n"
-            f"📦 <b>My Proxies:</b>     <code>{n}</code>\\n"
-            f"🌍 <b>Global Proxies:</b> <code>{len(PROXIES_LIST)}</code>\\n\\n"
-            f"<i>Send a .txt file with proxies (one per line) with caption <b>proxy</b>\\n"
+            f"🌐 <b>Proxy Settings</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📦 <b>My Proxies:</b>     <code>{n}</code>\n"
+            f"🌍 <b>Global Proxies:</b> <code>{len(PROXIES_LIST)}</code>\n\n"
+            f"<i>Send a .txt file with proxies (one per line) with caption <b>proxy</b>\n"
             f"Formats: ip:port  or  user:pass@ip:port</i>"
         )
         kbd = [
@@ -1503,8 +1503,8 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     # ── Redeem prompt ─────────────────────────────────────────────────────────
     elif data == "redeem_prompt":
         await q.edit_message_text(
-            "💳 <b>Redeem a Key</b>\\n━━━━━━━━━━━━━━━━━━\\n"
-            "Use: <code>/redeem YOUR-KEY-HERE</code>\\n\\n"
+            "💳 <b>Redeem a Key</b>\n━━━━━━━━━━━━━━━━━━\n"
+            "Use: <code>/redeem YOUR-KEY-HERE</code>\n\n"
             "<i>Keys are sold by @Akaza_isnt</i>",
             reply_markup=InlineKeyboardMarkup(_back_btn()), parse_mode="HTML")
 
@@ -1513,11 +1513,11 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
         pos    = _queue_position(uid)
         active = len(active_sessions)
         if uid in active_sessions:
-            txt = (f"✅ <b>Your session is active!</b>\\n"
+            txt = (f"✅ <b>Your session is active!</b>\n"
                    f"Running sessions: <code>{active}/{MAX_CONCURRENT}</code>")
         elif pos > 0:
-            txt = (f"⏳ <b>Queue Position: #{pos}</b>\\n"
-                   f"Active: <code>{active}/{MAX_CONCURRENT}</code>\\n"
+            txt = (f"⏳ <b>Queue Position: #{pos}</b>\n"
+                   f"Active: <code>{active}/{MAX_CONCURRENT}</code>\n"
                    f"Est. wait: ~<code>{pos * 3} min</code>")
         else:
             txt = "✅ You are not in any queue or active session."
@@ -1526,34 +1526,34 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     # ── Help ──────────────────────────────────────────────────────────────────
     elif data == "help":
         txt = (
-            "📖 <b>AKAZA Help Guide</b>\\n"
-            "━━━━━━━━━━━━━━━━━━\\n"
-            "🔷 <b>How to Check:</b>\\n"
-            "  Send a combo .txt file or paste\\n"
-            "  <code>email:password</code> lines directly.\\n\\n"
-            "🔷 <b>Commands:</b>\\n"
-            "  /start — Main menu\\n"
-            "  /threads &lt;n&gt; — Set thread count\\n"
-            "  /fastmode — Toggle fast mode\\n"
-            "  /addkw &lt;word&gt; — Add keyword(s)\\n"
-            "  /skw — Stop keyword input mode\\n"
-            "  /ckw — Clear all keywords\\n"
-            "  /redeem &lt;key&gt; — Redeem a credit key\\n"
-            "  /check email:pass — Single check\\n\\n"
-            "🔷 <b>File Upload:</b>\\n"
-            "  .txt with caption <b>combo</b> → start checking\\n"
-            "  .txt with caption <b>proxy</b> → load proxies\\n\\n"
-            "🔷 <b>Output Files:</b>\\n"
-            "  🎯 hits.txt — All valid accounts\\n"
-            "  🏆 points.txt — Rewards (high→low)\\n"
-            "  💎 microsoft_hits.txt — Active subs first\\n"
-            "  🎮 psn.txt — PlayStation orders\\n"
-            "  📄 codes.txt — Redemption codes\\n"
-            "  📥 inbox.txt — Keyword/IMAP hits\\n\\n"
-            "🔷 <b>Tips:</b>\\n"
-            "  • Use proxies for 300+ thread speeds\\n"
-            "  • Fast Mode = rewards+codes only (fastest)\\n"
-            "  • 💎 Premium users bypass the queue\\n\\n"
+            "📖 <b>AKAZA Help Guide</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "🔷 <b>How to Check:</b>\n"
+            "  Send a combo .txt file or paste\n"
+            "  <code>email:password</code> lines directly.\n\n"
+            "🔷 <b>Commands:</b>\n"
+            "  /start — Main menu\n"
+            "  /threads &lt;n&gt; — Set thread count\n"
+            "  /fastmode — Toggle fast mode\n"
+            "  /addkw &lt;word&gt; — Add keyword(s)\n"
+            "  /skw — Stop keyword input mode\n"
+            "  /ckw — Clear all keywords\n"
+            "  /redeem &lt;key&gt; — Redeem a credit key\n"
+            "  /check email:pass — Single check\n\n"
+            "🔷 <b>File Upload:</b>\n"
+            "  .txt with caption <b>combo</b> → start checking\n"
+            "  .txt with caption <b>proxy</b> → load proxies\n\n"
+            "🔷 <b>Output Files:</b>\n"
+            "  🎯 hits.txt — All valid accounts\n"
+            "  🏆 points.txt — Rewards (high→low)\n"
+            "  💎 microsoft_hits.txt — Active subs first\n"
+            "  🎮 psn.txt — PlayStation orders\n"
+            "  📄 codes.txt — Redemption codes\n"
+            "  📥 inbox.txt — Keyword/IMAP hits\n\n"
+            "🔷 <b>Tips:</b>\n"
+            "  • Use proxies for 300+ thread speeds\n"
+            "  • Fast Mode = rewards+codes only (fastest)\n"
+            "  • 💎 Premium users bypass the queue\n\n"
             "🛒 Support: @Akaza_isnt"
         )
         await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(_back_btn()), parse_mode="HTML")
@@ -1564,13 +1564,13 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
         active = len(active_sessions)
         queued = len(_session_queue)
         txt = (
-            f"🛠 <b>Admin Panel</b>\\n"
-            f"━━━━━━━━━━━━━━━━━━\\n"
-            f"👥 <b>Total Users:</b>  <code>{st['total']}</code>\\n"
-            f"✅ <b>Active Users:</b> <code>{st.get('active', 0)}</code>\\n"
-            f"🔍 <b>Total Checks:</b> <code>{st['checks']}</code>\\n"
-            f"🎯 <b>Total Hits:</b>   <code>{st['hits']}</code>\\n"
-            f"⚡ <b>Running:</b>      <code>{active}/{MAX_CONCURRENT}</code>\\n"
+            f"🛠 <b>Admin Panel</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"👥 <b>Total Users:</b>  <code>{st['total']}</code>\n"
+            f"✅ <b>Active Users:</b> <code>{st.get('active', 0)}</code>\n"
+            f"🔍 <b>Total Checks:</b> <code>{st['checks']}</code>\n"
+            f"🎯 <b>Total Hits:</b>   <code>{st['hits']}</code>\n"
+            f"⚡ <b>Running:</b>      <code>{active}/{MAX_CONCURRENT}</code>\n"
             f"⏳ <b>In Queue:</b>    <code>{queued}</code>"
         )
         kbd = [
@@ -1583,8 +1583,8 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
     elif data == "admin_stats" and akaza_db.is_mod(uid):
         st = akaza_db.get_global_stats()
         await q.edit_message_text(
-            f"📊 <b>Global Stats</b>\\n"
-            f"Users: <code>{st['total']}</code> | Active: <code>{st.get('active',0)}</code>\\n"
+            f"📊 <b>Global Stats</b>\n"
+            f"Users: <code>{st['total']}</code> | Active: <code>{st.get('active',0)}</code>\n"
             f"Checks: <code>{st['checks']}</code> | Hits: <code>{st['hits']}</code>",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin")]]),
             parse_mode="HTML")
@@ -1594,8 +1594,8 @@ async def cb_handler(u: Update, c: ContextTypes.DEFAULT_TYPE):
         lines  = ["  • <code>" + str(x) + "</code>" for x in ids] if ids else ["  None"]
         qlines = ["  #" + str(i+1) + " <code>" + str(x) + "</code>" for i,(x,_) in enumerate(_session_queue)] if _session_queue else ["  None"]
         await q.edit_message_text(
-            "💬 <b>Active Sessions</b>\\n" + "\\n".join(lines) + "\\n\\n"
-            "⏳ <b>Queue</b>\\n" + "\\n".join(qlines),
+            "💬 <b>Active Sessions</b>\n" + "\n".join(lines) + "\n\n"
+            "⏳ <b>Queue</b>\n" + "\n".join(qlines),
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin")]]),
             parse_mode="HTML")
 
